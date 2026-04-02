@@ -1,0 +1,30 @@
+# ── Core deep learning ────────────────────────────────────────────────────────
+torch>=2.2.0          # PyTorch: builds and trains the U-Net
+torchvision>=0.17.0   # torchvision: image transforms and utilities used during training
+
+# ── Medical imaging I/O ───────────────────────────────────────────────────────
+SimpleITK>=2.3.0      # Reads/writes DICOM and NIfTI volumes; handles voxel spacing metadata
+nibabel>=5.2.0        # Reads NIfTI (.nii, .nii.gz) files — used as secondary I/O option
+pydicom>=2.4.0        # Low-level DICOM tag reading; used when SimpleITK is insufficient
+
+# ── Numerical & data handling ─────────────────────────────────────────────────
+numpy>=1.26.0         # All array math — every volume, mask, and patch is a NumPy array
+pandas>=2.2.0         # Loading and managing patient metadata / split CSVs
+h5py>=3.11.0          # Saves preprocessed volumes to HDF5 files for fast training I/O
+scipy>=1.13.0         # Gaussian filters, morphological ops, B-spline fitting (Phase 3)
+scikit-learn>=1.4.0   # Train/val/test split utilities, metrics
+
+# ── Visualisation ─────────────────────────────────────────────────────────────
+matplotlib>=3.9.0     # Plots: training curves, slice overlays, trajectory graphs
+seaborn>=0.13.0       # Styled statistical plots for results tables
+opencv-python>=4.9.0  # Image resizing, drawing contours, video export for tracking animation
+
+# ── Experiment tracking ───────────────────────────────────────────────────────
+mlflow>=2.13.0        # Logs hyperparameters, metrics, and model checkpoints per experiment
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+surface-distance>=0.1 # Computes Hausdorff Distance (HD95) between predicted and GT masks
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+tqdm>=4.66.0          # Progress bars for loops (preprocessing, training, inference)
+pyyaml>=6.0.1         # Reads configs/config.yaml at runtime
