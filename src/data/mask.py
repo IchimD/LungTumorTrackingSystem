@@ -2,8 +2,9 @@ import math
 from typing import Sequence
 
 import numpy as np
+from scipy.ndimage import binary_dilation, generate_binary_structure
 
-from coords import world_to_voxel
+from ..coords import world_to_voxel
 
 
 def create_nodule_mask(
@@ -45,10 +46,13 @@ def create_nodule_mask(
             origin,
             spacing,
         )
-        radius_mm = float(nodule["diameter_mm"]) / 2.0
-
         vz, vy, vx = center_voxel
-        # Calculate bounding box around the sphere
+        
+        # Boundary check: skip nodule if center is outside scan bounds
+        if not (0 <= vz < scan_shape[0] and 0 <= vy < scan_shape[1] and 0 <= vx < scan_shape[2]):
+            continue
+        
+        radius_mm = float(nodule["diameter_mm"]) / 2.0 * 5.0  # 5× larger for training        # Calculate bounding box around the sphere
         rz = int(math.ceil(radius_mm / spacing[0]))
         ry = int(math.ceil(radius_mm / spacing[1]))
         rx = int(math.ceil(radius_mm / spacing[2]))
@@ -76,4 +80,18 @@ def create_nodule_mask(
         # Set mask values
         mask[z0:z1, y0:y1, x0:x1] |= sphere.astype(np.uint8)
 
-    return mask
+    # Ensure mask is uint8 before morphological operations
+    mask = mask.astype(np.uint8)
+
+    # Apply aggressive binary dilation if mask contains any positive voxels
+    if mask.any():
+        structure = generate_binary_structure(3, 2)
+        mask = binary_dilation(mask, structure=structure, iterations=8).astype(np.uint8)
+
+    from scipy.ndimage import binary_dilation, generate_binary_structure
+    
+    if mask.any():
+        structure = generate_binary_structure(3, 2)
+        mask = binary_dilation(mask, structure=structure, iterations=8)
+    
+    return mask.astype(np.uint8)

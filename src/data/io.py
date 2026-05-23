@@ -4,7 +4,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from scan_io import load_scan
+from ..scan_io import load_scan
 
 SUPPORTED_EXTENSIONS = (".npy", ".npz", ".mhd")
 

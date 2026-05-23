@@ -1,13 +1,16 @@
 import os
+import time
 from typing import Iterable, Optional, Sequence, Tuple
 
 import numpy as np
+from scipy.ndimage import binary_dilation, generate_binary_structure
+from tqdm import tqdm
 
 from .mask import create_nodule_mask
 from .utils import parse_spacing, progress_iter
 from .volume import normalize_hu, resample_volume, save_volume
-from annotation_io import build_patient_index, load_annotations
-from scan_io import list_all_patients, load_scan
+from ..annotation_io import build_patient_index, load_annotations
+from ..scan_io import list_all_patients, load_scan
 
 
 def preprocess_patient(
@@ -45,11 +48,35 @@ def preprocess_patient(
     if os.path.exists(output_image_path) and os.path.exists(output_mask_path) and not overwrite:
         return
 
-    volume, spacing, origin = load_scan(mhd_path)
+    try:
+        volume, spacing, origin = load_scan(mhd_path)
+    except Exception as e:
+        print(f"\nWARNING: Skipping {os.path.basename(mhd_path)} - corrupted file")
+        return
     if output_spacing is not None and not np.allclose(spacing, output_spacing):
         volume, spacing = resample_volume(volume, spacing, output_spacing)
 
     mask = create_nodule_mask(volume.shape, nodules, spacing, origin)
+
+    # Quick mask summary (only when nodules were expected)
+    if len(nodules) > 0:
+        total_nodule_pixels_quick = int(mask.sum())
+        print(f"[{os.path.basename(mhd_path)}] Mask pixels: {total_nodule_pixels_quick}, Expected nodules: {len(nodules)}")
+
+    # Dilate mask to ensure nodules survive resizing
+    if mask.any():
+        struct = generate_binary_structure(3, 2)
+        mask = binary_dilation(mask.astype(np.uint8), structure=struct, iterations=2).astype(np.uint8)
+
+    # Validate mask quality
+    if len(nodules) > 0:  # Only check if nodules were expected
+        total_nodule_pixels = int(mask.sum())
+        if total_nodule_pixels < 100:
+            print(f"WARNING: {os.path.basename(mhd_path)} has only {total_nodule_pixels} nodule pixels (expected {len(nodules)} nodules)")
+            print(f"  Nodule details: {[(n['diameter_mm'], n['coordX'], n['coordY'], n['coordZ']) for n in nodules]}")
+        else:
+            print(f"✓ {os.path.basename(mhd_path)}: {total_nodule_pixels} nodule pixels across {len(nodules)} nodules")
+
     volume = normalize_hu(volume, *hu_window)
 
     save_volume(output_image_path, volume)
@@ -95,23 +122,87 @@ def preprocess_subset(
 
     image_dir = os.path.join(output_dir, "images")
     mask_dir = os.path.join(output_dir, "masks")
+    warnings_log_path = os.path.join(output_dir, "preprocessing_warnings.txt")
 
-    iterator: Iterable[str] = progress_iter(patients, desc="Preprocessing")
-    for patient_id in iterator:
-        mhd_path = os.path.join(subset_path, f"{patient_id}.mhd")
-        image_path = os.path.join(image_dir, f"{patient_id}.npy")
-        mask_path = os.path.join(mask_dir, f"{patient_id}.npy")
+    start_time = time.time()
+    processed = 0
+    failed = 0
+    
+    for patient_id in tqdm(patients, desc="Preprocessing patients", unit="patient"):
+        try:
+            mhd_path = os.path.join(subset_path, f"{patient_id}.mhd")
+            image_path = os.path.join(image_dir, f"{patient_id}.npy")
+            mask_path = os.path.join(mask_dir, f"{patient_id}.npy")
 
-        nodules = index.get(patient_id, [])
-        preprocess_patient(
-            mhd_path,
-            nodules,
-            image_path,
-            mask_path,
-            output_spacing=output_spacing,
-            hu_window=hu_window,
-            overwrite=overwrite,
-        )
+            nodules = index.get(patient_id, [])
+            num_nodules = len(nodules)
+            
+            print(f"\n[{patient_id}] Processing: {num_nodules} nodule(s) found")
+            
+            preprocess_patient(
+                mhd_path,
+                nodules,
+                image_path,
+                mask_path,
+                output_spacing=output_spacing,
+                hu_window=hu_window,
+                overwrite=overwrite,
+            )
+            
+            # Validation: check mask quality and consistency
+            if os.path.exists(image_path) and os.path.exists(mask_path):
+                try:
+                    image = np.load(image_path)
+                    mask = np.load(mask_path)
+                    
+                    image_shape = image.shape
+                    mask_shape = mask.shape
+                    nodule_pixels = int(np.sum(mask > 0))
+                    
+                    warnings = []
+                    
+                    # Check shape mismatch
+                    if image_shape != mask_shape:
+                        warnings.append(f"Shape mismatch: image {image_shape} vs mask {mask_shape}")
+                    
+                    # Check if expected nodules but mask is empty
+                    if num_nodules > 0 and nodule_pixels == 0:
+                        warnings.append(f"Expected {num_nodules} nodule(s) but mask is empty (0 pixels)")
+                    
+                    # Check if nodule pixels too small
+                    if 0 < nodule_pixels < 50:
+                        warnings.append(f"Nodule pixels too small ({nodule_pixels} < 50), may fail training")
+                    
+                    # Log and print warnings
+                    if warnings:
+                        for warning in warnings:
+                            warning_msg = f"[{patient_id}] ⚠ {warning}"
+                            print(warning_msg)
+                            with open(warnings_log_path, "a") as f:
+                                f.write(warning_msg + "\n")
+                    
+                except Exception as e:
+                    print(f"[{patient_id}] ⚠ Validation error: {str(e)}")
+                    with open(warnings_log_path, "a") as f:
+                        f.write(f"[{patient_id}] Validation error: {str(e)}\n")
+            
+            processed += 1
+            print(f"[{patient_id}] ✓ Successfully processed")
+            
+        except Exception as e:
+            failed += 1
+            print(f"[{patient_id}] ✗ ERROR: {str(e)}")
+            continue
+    
+    elapsed_time = time.time() - start_time
+    print(f"\n{'='*60}")
+    print(f"Preprocessing Summary:")
+    print(f"  Total patients: {len(patients)}")
+    print(f"  Successfully processed: {processed}")
+    print(f"  Failed: {failed}")
+    print(f"  Total time: {elapsed_time:.2f}s")
+    print(f"{'='*60}")
+
 
 
 def main() -> None:

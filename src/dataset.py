@@ -9,14 +9,14 @@ import argparse
 #   annotation_io.py — CSV metadata loading and patient indexing
 #   coords.py        — world ↔ voxel coordinate conversion
 # ---------------------------------------------------------------------------
-from scan_io import list_all_patients, load_scan
-from annotation_io import (
+from .scan_io import list_all_patients, load_scan
+from .annotation_io import (
     load_annotations,
     load_candidates,
     build_patient_index,
     get_patient_nodules,
 )
-from coords import world_to_voxel, voxel_to_world
+from .coords import world_to_voxel, voxel_to_world
 
 __all__ = [
     "list_all_patients",

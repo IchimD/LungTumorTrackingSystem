@@ -1,4 +1,4 @@
-from data.dataset import LUNA16Dataset, main
+from .data.dataset import LUNA16Dataset, main
 
 __all__ = ["LUNA16Dataset", "main"]
 
