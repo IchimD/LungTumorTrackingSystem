@@ -101,7 +101,8 @@ class VolumeSliceDataset(Dataset):
         mask_resized = zoom(mask.astype(np.float32), scale_factors, order=0)
 
         image_tensor = torch.from_numpy(np.asarray(image_resized, dtype=np.float32)).unsqueeze(0)
-        mask_tensor = torch.from_numpy(np.asarray(mask_resized, dtype=np.uint8)).unsqueeze(0)
+        mask_resized_binary = (mask_resized > 0.5).astype(np.float32)  # Ensure binary 0 or 1
+        mask_tensor = torch.from_numpy(mask_resized_binary).unsqueeze(0)
 
         if self.augment_fn is not None:
             image_tensor, mask_tensor = self.augment_fn(image_tensor, mask_tensor)
