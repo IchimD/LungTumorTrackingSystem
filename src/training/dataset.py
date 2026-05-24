@@ -1,6 +1,7 @@
 import glob
 import os
 import random
+import warnings
 from typing import Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -18,6 +19,24 @@ from src.data.io import (
 
 TransformFn = Callable[[torch.Tensor], torch.Tensor]
 AugmentFn = Callable[[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]
+
+
+def safe_np_load(path: str) -> np.ndarray:
+    """Load NumPy volumes safely, with a fallback for pickled objects."""
+    try:
+        return np.load(path, allow_pickle=False)
+    except Exception as base_exc:
+        warnings.warn(
+            f"np.load failed for {path} with allow_pickle=False: {base_exc}. Retrying with allow_pickle=True.",
+            UserWarning,
+        )
+        try:
+            arr = np.load(path, allow_pickle=True)
+            if not isinstance(arr, np.ndarray):
+                raise ValueError(f"Loaded object is not an ndarray: {type(arr)}")
+            return arr
+        except Exception:
+            raise base_exc
 
 
 class VolumeSliceDataset(Dataset):
@@ -50,13 +69,30 @@ class VolumeSliceDataset(Dataset):
 
     def _discover_patients(self, patient_ids: Optional[Sequence[str]]) -> None:
         allowed = set(patient_ids) if patient_ids is not None else None
-        image_paths = sorted(
-            p
-            for p in glob.glob(os.path.join(self.image_dir, "*"))
-            if os.path.splitext(p)[1].lower() in SUPPORTED_EXTENSIONS
-        )
+        candidates = [
+            os.path.join(self.image_dir, "*"),
+            os.path.join(self.image_dir, "images", "*"),
+            os.path.join(self.image_dir, "**", "*"),
+        ]
+
+        image_paths = []
+        for pattern in candidates:
+            try:
+                matches = sorted(
+                    p
+                    for p in glob.glob(pattern, recursive="**" in pattern)
+                    if os.path.splitext(p)[1].lower() in SUPPORTED_EXTENSIONS
+                )
+                if matches:
+                    image_paths = matches
+                    break
+            except Exception:
+                continue
 
         for image_path in image_paths:
+            if not os.path.isfile(image_path):
+                continue
+
             patient_id = patient_id_from_filename(image_path)
             if allowed is not None and patient_id not in allowed:
                 continue
@@ -72,9 +108,12 @@ class VolumeSliceDataset(Dataset):
 
     def __getitem__(self, index: int):
         image_path, mask_path, patient_id = self._items[index]
-        
-        # Load mask volume directly
-        mask_volume = normalize_mask(np.load(mask_path, mmap_mode='r'))
+
+        try:
+            mask_volume = normalize_mask(safe_np_load(mask_path))
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load mask for patient {patient_id}: {mask_path}") from exc
+
         positive_slices = [z for z in range(mask_volume.shape[0]) if mask_volume[z].any()]
         negative_slices = [z for z in range(mask_volume.shape[0]) if not mask_volume[z].any()]
 
@@ -86,10 +125,20 @@ class VolumeSliceDataset(Dataset):
         elif positive_slices:
             slice_index = random.choice(positive_slices)
         else:
-            slice_index = random.randint(0, mask_volume.shape[0] - 1)
+            raise RuntimeError(
+                f"No valid mask slices found for patient {patient_id} in file {mask_path}."
+            )
 
-        # Load image volume directly and extract slice
-        image_volume = np.load(image_path, mmap_mode='r')
+        try:
+            image_volume = safe_np_load(image_path)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load image for patient {patient_id}: {image_path}") from exc
+
+        if slice_index >= image_volume.shape[0]:
+            raise RuntimeError(
+                f"Slice index {slice_index} out of bounds for image {image_path} with shape {image_volume.shape}"
+            )
+
         image = image_volume[slice_index]
         mask = mask_volume[slice_index]
 
