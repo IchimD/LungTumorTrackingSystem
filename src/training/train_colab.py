@@ -82,19 +82,19 @@ def train_one_epoch(
     model.train()
     total_loss = 0.0
 
-    pbar = tqdm(dataloader, desc="Train", leave=False)
-    for images, masks, _ in pbar:
-        images = images.to(device, dtype=torch.float32)
-        masks = masks.to(device, dtype=torch.float32)
+    with tqdm(dataloader, desc="Train", leave=False) as pbar:
+        for images, masks, _ in pbar:
+            images = images.to(device, dtype=torch.float32)
+            masks = masks.to(device, dtype=torch.float32)
 
-        optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, masks)
-        loss.backward()
-        optimizer.step()
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, masks)
+            loss.backward()
+            optimizer.step()
 
-        total_loss += float(loss.detach().cpu())
-        pbar.set_postfix(loss=total_loss / (pbar.n + 1e-8))
+            total_loss += float(loss.detach().cpu())
+            pbar.set_postfix(loss=total_loss / (pbar.n + 1e-8))
 
     return total_loss / max(len(dataloader), 1)
 
@@ -114,19 +114,19 @@ def evaluate(
     count = 0
 
     with torch.no_grad():
-        pbar = tqdm(dataloader, desc="Val", leave=False)
-        for images, masks, _ in pbar:
-            images = images.to(device, dtype=torch.float32)
-            masks = masks.to(device, dtype=torch.float32)
-            outputs = model(images)
-            loss = criterion(outputs, masks)
+        with tqdm(dataloader, desc="Val", leave=False) as pbar:
+            for images, masks, _ in pbar:
+                images = images.to(device, dtype=torch.float32)
+                masks = masks.to(device, dtype=torch.float32)
+                outputs = model(images)
+                loss = criterion(outputs, masks)
 
-            total_loss += float(loss.detach().cpu())
-            total_dice += dice_score(outputs, masks)
-            total_iou += iou_score(outputs, masks)
-            total_sensitivity += sensitivity_score(outputs, masks)
-            total_precision += precision_score(outputs, masks)
-            count += 1
+                total_loss += float(loss.detach().cpu())
+                total_dice += dice_score(outputs, masks)
+                total_iou += iou_score(outputs, masks)
+                total_sensitivity += sensitivity_score(outputs, masks)
+                total_precision += precision_score(outputs, masks)
+                count += 1
 
     return {
         "loss": total_loss / max(count, 1),
