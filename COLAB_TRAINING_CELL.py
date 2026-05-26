@@ -95,7 +95,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 from tqdm import tqdm
-from scipy.ndimage import zoom, map_coordinates, gaussian_filter
+from scipy.ndimage import zoom
 import matplotlib
 matplotlib.use("Agg")          # non-interactive backend — safe in Colab
 import matplotlib.pyplot as plt
@@ -129,11 +129,11 @@ CONFIG = {
     "lr_min":           1e-6,      # floor for ReduceLROnPlateau
     "lr_patience":         10,     # epochs without Dice improvement before halving LR
     "lr_factor":          0.5,
-    "early_stop_patience": 25,     # stop if no improvement for 25 epochs
+    "early_stop_patience": 40,     # survive ReduceLROnPlateau transient dips
     "grad_clip":          1.0,     # max gradient norm
     "val_fraction":       0.15,
     "seed":                 42,
-    "num_workers":           4,    # 4090 instance has plenty of CPU cores
+    "num_workers":           2,    # data is pre-loaded; workers just do augmentation
     "augment":            True,
     "resume":             False,   # fresh start — previous checkpoint was bad
     # ── data ─────────────────────────────────────────────────────────────────
@@ -171,6 +171,13 @@ def safe_np_load(path: str) -> np.ndarray:
 
 
 class VolumeSliceDataset(Dataset):
+    """
+    Enumerates EVERY positive slice from every volume at init time and pre-loads
+    them as resized 256×256 numpy arrays.  __getitem__ does only augmentation —
+    no file I/O during training.  This gives 10-30× more gradient updates per
+    epoch compared to the old one-slice-per-patient approach.
+    """
+
     def __init__(
         self,
         image_dir: str,
@@ -179,19 +186,18 @@ class VolumeSliceDataset(Dataset):
         augment_fn=None,
         background_ratio: float = 0.05,
     ) -> None:
-        self.image_dir = image_dir
-        self.mask_dir = mask_dir
         self.augment_fn = augment_fn
-        self.background_ratio = background_ratio
-        self._items: List[Tuple[str, str, str]] = []
-        self._discover_patients(patient_ids)
-        if not self._items:
-            raise ValueError(f"No patients found in {image_dir!r} / {mask_dir!r}")
+        # (img_256, msk_256, pid) — float32 numpy arrays, already resized
+        self._slices: List[Tuple[np.ndarray, np.ndarray, str]] = []
+        self._build_index(image_dir, mask_dir, patient_ids, background_ratio)
+        if not self._slices:
+            raise ValueError(f"No slices found in {image_dir!r} / {mask_dir!r}")
 
-    def _discover_patients(self, patient_ids):
+    @staticmethod
+    def _find_candidates(image_dir, mask_dir, patient_ids):
         allowed = set(patient_ids) if patient_ids is not None else None
         found = []
-        for base in [self.image_dir, os.path.join(self.image_dir, "images")]:
+        for base in [image_dir, os.path.join(image_dir, "images")]:
             if os.path.isdir(base):
                 entries = sorted(
                     os.path.join(base, p)
@@ -203,7 +209,7 @@ class VolumeSliceDataset(Dataset):
                     break
         if not found:
             found = sorted(
-                p for p in glob.glob(os.path.join(self.image_dir, "**", "*"), recursive=True)
+                p for p in glob.glob(os.path.join(image_dir, "**", "*"), recursive=True)
                 if os.path.splitext(p)[1].lower() in SUPPORTED_EXTENSIONS
             )
         candidates = []
@@ -213,69 +219,69 @@ class VolumeSliceDataset(Dataset):
             pid = patient_id_from_filename(image_path)
             if allowed is not None and pid not in allowed:
                 continue
-            mask_path = find_matching_mask(image_path, self.mask_dir)
+            mask_path = find_matching_mask(image_path, mask_dir)
             if mask_path is None:
                 continue
             candidates.append((image_path, mask_path, pid))
+        return candidates
 
-        # Pre-filter: skip patients whose mask is entirely zero.
-        # All-zero masks inflate Dice to ~1.0 via the smooth term and cause
-        # repeated warnings inside __getitem__ during multi-worker loading.
-        print(f"  [Dataset] Pre-filtering {len(candidates)} candidates for positive masks …")
-        for image_path, mask_path, pid in candidates:
+    def _build_index(self, image_dir, mask_dir, patient_ids, background_ratio):
+        candidates = self._find_candidates(image_dir, mask_dir, patient_ids)
+        print(f"  [Dataset] Loading {len(candidates)} volumes — extracting every positive slice …")
+
+        pos: List[Tuple[np.ndarray, np.ndarray, str]] = []
+        neg: List[Tuple[np.ndarray, np.ndarray, str]] = []
+
+        for i, (img_path, msk_path, pid) in enumerate(candidates):
             try:
-                mask = normalize_mask(safe_np_load(mask_path))
-                if mask.any():
-                    self._items.append((image_path, mask_path, pid))
-            except Exception:
-                pass
-        removed = len(candidates) - len(self._items)
-        if removed:
-            print(f"  [Dataset] Removed {removed} all-zero-mask patients; kept {len(self._items)}")
+                img_vol = safe_np_load(img_path).astype(np.float32)
+                msk_vol = normalize_mask(safe_np_load(msk_path)).astype(np.float32)
 
-    def __len__(self):
-        return len(self._items)
+                if img_vol.ndim == 2:   # single-slice file stored as 2-D
+                    img_vol = img_vol[np.newaxis]
+                    msk_vol = msk_vol[np.newaxis]
 
-    def __getitem__(self, index):
-        for _ in range(5):
-            index = index % len(self._items)
-            image_path, mask_path, pid = self._items[index]
-            try:
-                mask_vol = normalize_mask(safe_np_load(mask_path))
-                pos = [z for z in range(mask_vol.shape[0]) if mask_vol[z].any()]
-                neg = [z for z in range(mask_vol.shape[0]) if not mask_vol[z].any()]
-                if pos and neg:
-                    z = random.choice(neg) if random.random() < self.background_ratio else random.choice(pos)
-                elif pos:
-                    z = random.choice(pos)
-                else:
-                    # Mask turned all-zero at runtime (shouldn't happen after pre-filter)
-                    index = (index + 1) % len(self._items)
-                    continue
-                img_vol = safe_np_load(image_path)
-                image, mask = img_vol[z], mask_vol[z]
-                break
-            except Exception:
-                index = (index + 1) % len(self._items)
-        else:
-            raise RuntimeError("Failed to load valid sample after 5 attempts.")
+                n_z = min(img_vol.shape[0], msk_vol.shape[0])
+                for z in range(n_z):
+                    img_s = img_vol[z]
+                    msk_s = msk_vol[z]
+                    sf    = (256 / img_s.shape[0], 256 / img_s.shape[1])
+                    img_r = zoom(img_s, sf, order=1)
+                    img_r = (img_r - img_r.min()) / (img_r.max() - img_r.min() + 1e-8)
+                    msk_r = (zoom(msk_s, sf, order=0) > 0.5).astype(np.float32)
+                    if msk_r.any():
+                        pos.append((img_r, msk_r, pid))
+                    else:
+                        neg.append((img_r, msk_r, pid))
 
-        # Resize to 256×256 — 4× less memory/compute vs 512, Dice barely changes
-        sf = (256 / image.shape[0], 256 / image.shape[1])
-        img_r = zoom(image.astype(np.float32), sf, order=1)
-        img_r = (img_r - img_r.min()) / (img_r.max() - img_r.min() + 1e-8)
-        msk_r = (zoom(mask.astype(np.float32), sf, order=0) > 0.5).astype(np.float32)
+            except Exception as e:
+                warnings.warn(f"  Skipping {pid}: {e}", UserWarning)
 
-        img_t = torch.from_numpy(img_r).unsqueeze(0)
-        msk_t = torch.from_numpy(msk_r).unsqueeze(0)
+            if (i + 1) % 100 == 0 or (i + 1) == len(candidates):
+                print(f"    {i+1}/{len(candidates)} volumes  "
+                      f"({len(pos)} positive, {len(neg)} background slices so far)")
 
+        n_bg = int(len(pos) * background_ratio / max(1.0 - background_ratio, 1e-8))
+        n_bg = min(n_bg, len(neg))
+        random.shuffle(neg)
+
+        self._slices = pos + neg[:n_bg]
+        random.shuffle(self._slices)
+        print(f"  [Dataset] {len(pos)} positive + {n_bg} background = {len(self._slices)} slices total")
+
+    def __len__(self) -> int:
+        return len(self._slices)
+
+    def __getitem__(self, index: int):
+        img_r, msk_r, pid = self._slices[index]
+        img_t = torch.from_numpy(img_r.copy()).unsqueeze(0)
+        msk_t = torch.from_numpy(msk_r.copy()).unsqueeze(0)
         if self.augment_fn is not None:
             img_t, msk_t = self.augment_fn(img_t, msk_t)
-
         return img_t, msk_t, pid
 
-    def get_patient_ids(self):
-        return [pid for _, _, pid in self._items]
+    def get_patient_ids(self) -> List[str]:
+        return list(set(pid for _, _, pid in self._slices))
 
 
 # ============================================================================
@@ -305,21 +311,6 @@ def build_augmentation_fn(enable: bool):
             alpha = random.uniform(0.8, 1.2)   # contrast
             beta  = random.uniform(-0.1, 0.1)  # brightness
             img = (img * alpha + beta).clamp(0.0, 1.0)
-
-        # Elastic deformation — gold standard for medical image augmentation
-        if random.random() < 0.3:
-            img_np = img.squeeze(0).numpy()
-            msk_np = mask.squeeze(0).numpy()
-            shape  = img_np.shape
-            dx = gaussian_filter(np.random.randn(*shape) * 80, sigma=9)
-            dy = gaussian_filter(np.random.randn(*shape) * 80, sigma=9)
-            gx, gy = np.meshgrid(np.arange(shape[1]), np.arange(shape[0]))
-            coords = [np.clip((gy + dy).ravel(), 0, shape[0]-1),
-                      np.clip((gx + dx).ravel(), 0, shape[1]-1)]
-            img_np = map_coordinates(img_np, coords, order=1, mode="reflect").reshape(shape)
-            msk_np = (map_coordinates(msk_np, coords, order=0, mode="reflect").reshape(shape) > 0.5).astype(np.float32)
-            img  = torch.from_numpy(img_np).unsqueeze(0)
-            mask = torch.from_numpy(msk_np).unsqueeze(0)
 
         return img, mask
 
