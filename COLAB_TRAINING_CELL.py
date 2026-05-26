@@ -127,19 +127,19 @@ CONFIG = {
     "epochs":             120,
     "lr":               3e-4,      # lower start; scheduler handles decay
     "lr_min":           1e-6,      # floor for ReduceLROnPlateau
-    "lr_patience":          8,     # epochs on plateau before halving LR
+    "lr_patience":         10,     # more patience before halving LR
     "lr_factor":          0.5,
-    "early_stop_patience": 20,     # stop if no improvement for this many epochs
+    "early_stop_patience": 25,     # more patience — bigger dataset needs more time
     "grad_clip":          1.0,     # max gradient norm
     "val_fraction":       0.15,
     "seed":                 42,
     "num_workers":           4,    # 4090 instance has plenty of CPU cores
     "augment":            True,
-    "resume":             True,
+    "resume":             False,   # fresh start — previous checkpoint was bad
     # ── data ─────────────────────────────────────────────────────────────────
     "background_ratio":   0.05,    # only 5 % background slices per epoch
     # ── model / loss ─────────────────────────────────────────────────────────
-    "base_channels":        64,    # 64 channels — 2× capacity vs T4 config
+    "base_channels":        32,    # 32 channels — proven stable config
     "bce_weight":          0.3,    # 70 % Dice + 30 % BCE loss
 }
 
