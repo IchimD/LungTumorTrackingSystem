@@ -28,25 +28,40 @@ Drive layout expected:
 # ============================================================================
 import os, sys
 
-print("=" * 70)
+# ── Detect environment ────────────────────────────────────────────────────────
+try:
+    from google.colab import drive as _colab_drive
+    IS_COLAB = True
+except ImportError:
+    IS_COLAB = False
+
+ENV = "Colab" if IS_COLAB else "Vast.ai / other"
+print(f"Environment: {ENV}")
+
+# ============================================================================
+# STEP 1 — Install dependencies
+# ============================================================================
+print("\n" + "=" * 70)
 print("STEP 1: Installing dependencies …")
 print("=" * 70)
 
-os.system(
-    "pip install -q torch torchvision torchaudio "
-    "--index-url https://download.pytorch.org/whl/cu118"
-)
+if IS_COLAB:
+    os.system(
+        "pip install -q torch torchvision torchaudio "
+        "--index-url https://download.pytorch.org/whl/cu118"
+    )
 os.system("pip install -q SimpleITK scipy tqdm tensorboard matplotlib")
 
 # ============================================================================
-# STEP 2 — Mount Google Drive
+# STEP 2 — Mount Google Drive (Colab only — Vast.ai uses local /workspace)
 # ============================================================================
-print("\n" + "=" * 70)
-print("STEP 2: Mounting Google Drive …")
-print("=" * 70)
-
-from google.colab import drive
-drive.mount("/content/drive", force_remount=True)
+if IS_COLAB:
+    print("\n" + "=" * 70)
+    print("STEP 2: Mounting Google Drive …")
+    print("=" * 70)
+    _colab_drive.mount("/content/drive", force_remount=True)
+else:
+    print("\nSTEP 2: Skipped (not Colab — data already on local disk)")
 
 # ============================================================================
 # STEP 3 — Clone / update repository
@@ -56,7 +71,7 @@ print("STEP 3: Cloning repository …")
 print("=" * 70)
 
 REPO_URL = "https://github.com/IchimD/LungTumorTrackingSystem"
-REPO_DIR = "/content/LungTumorTrackingSystem"
+REPO_DIR = "/content/LungTumorTrackingSystem" if IS_COLAB else "/workspace/LungTumorTrackingSystem"
 
 if os.path.exists(REPO_DIR):
     print("Repo already cloned — pulling latest …")
@@ -102,13 +117,13 @@ from src.data.io import (
 # CONFIGURATION  ← tune these values
 # ============================================================================
 CONFIG = {
-    # ── paths ────────────────────────────────────────────────────────────────
-    "image_dir":    "/content/drive/My Drive/LICENTA_COLAB ",          # trailing space is correct
-    "mask_dir":     "/content/drive/My Drive/LICENTA_COLAB /masks",    # trailing space is correct
-    "logs_dir":     "/tmp/tb_logs",                                    # local — fast, no Drive quota
-    "results_dir":  "/content/drive/My Drive/LICENTA_COLAB/results",
+    # ── paths (auto-detected per environment) ────────────────────────────────
+    "image_dir":   "/content/drive/My Drive/LICENTA_COLAB " if IS_COLAB else "/workspace/images",
+    "mask_dir":    "/content/drive/My Drive/LICENTA_COLAB /masks" if IS_COLAB else "/workspace/masks",
+    "logs_dir":    "/tmp/tb_logs",
+    "results_dir": "/content/drive/My Drive/LICENTA_COLAB/results" if IS_COLAB else "/workspace/results",
     # ── training ─────────────────────────────────────────────────────────────
-    "batch_size":          16,     # 16 + AMP fits T4 (14.6 GB); use 32 on A100
+    "batch_size":          64,     # RTX 4090 24 GB — 64 fits easily at 256×256
     "epochs":             120,
     "lr":               3e-4,      # lower start; scheduler handles decay
     "lr_min":           1e-6,      # floor for ReduceLROnPlateau
@@ -118,13 +133,13 @@ CONFIG = {
     "grad_clip":          1.0,     # max gradient norm
     "val_fraction":       0.15,
     "seed":                 42,
-    "num_workers":           2,    # 0 if you hit DataLoader errors
+    "num_workers":           4,    # 4090 instance has plenty of CPU cores
     "augment":            True,
     "resume":             True,
     # ── data ─────────────────────────────────────────────────────────────────
     "background_ratio":   0.05,    # only 5 % background slices per epoch
     # ── model / loss ─────────────────────────────────────────────────────────
-    "base_channels":        32,    # 64 for more capacity (needs more VRAM)
+    "base_channels":        64,    # 64 channels — 2× capacity vs T4 config
     "bce_weight":          0.3,    # 70 % Dice + 30 % BCE loss
 }
 
@@ -245,8 +260,8 @@ class VolumeSliceDataset(Dataset):
         else:
             raise RuntimeError("Failed to load valid sample after 5 attempts.")
 
-        # Resize to 512×512
-        sf = (512 / image.shape[0], 512 / image.shape[1])
+        # Resize to 256×256 — 4× less memory/compute vs 512, Dice barely changes
+        sf = (256 / image.shape[0], 256 / image.shape[1])
         img_r = zoom(image.astype(np.float32), sf, order=1)
         img_r = (img_r - img_r.min()) / (img_r.max() - img_r.min() + 1e-8)
         msk_r = (zoom(mask.astype(np.float32), sf, order=0) > 0.5).astype(np.float32)
@@ -646,13 +661,36 @@ for epoch in range(start_epoch, CONFIG["epochs"] + 1):
             print(f"\n⏹ Early stopping at epoch {epoch} (no improvement for {no_improve} epochs)")
             break
 
+    # Periodic checkpoint every 10 epochs — survives even if Dice never improves
+    if epoch % 10 == 0:
+        periodic_path = os.path.join(CONFIG["results_dir"], f"checkpoint_ep{epoch:03d}.pt")
+        torch.save(
+            {
+                "epoch":                epoch,
+                "model_state_dict":     model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "val_dice":             stats["dice"],
+                "config":               CONFIG,
+                "history":              history,
+            },
+            periodic_path,
+        )
+        print(f"  💾 Periodic checkpoint saved → {periodic_path}")
+
 writer.close()
 
-# Copy TensorBoard logs from /tmp to Drive for permanent storage
-drive_logs = "/content/drive/My Drive/LICENTA_COLAB/logs"
-os.makedirs(drive_logs, exist_ok=True)
-os.system(f"cp -r /tmp/tb_logs/. '{drive_logs}/'")
-print(f"✓ TensorBoard logs copied to Drive: {drive_logs}")
+# Copy TensorBoard logs to permanent storage
+if IS_COLAB:
+    drive_logs = "/content/drive/My Drive/LICENTA_COLAB/logs"
+    os.makedirs(drive_logs, exist_ok=True)
+    os.system(f"cp -r /tmp/tb_logs/. '{drive_logs}/'")
+    print(f"✓ TensorBoard logs copied to Drive: {drive_logs}")
+else:
+    # Vast.ai — sync logs and results back to Google Drive via rclone
+    print("Syncing results to Google Drive via rclone …")
+    os.system(f"rclone copy /workspace/results/ 'gdrive:LICENTA_COLAB/results/' --progress")
+    os.system(f"rclone copy /tmp/tb_logs/ 'gdrive:LICENTA_COLAB/logs/' --progress")
+    print("✓ Results and TensorBoard logs synced to Google Drive")
 
 # ============================================================================
 # FINAL SUMMARY
