@@ -105,7 +105,7 @@ CONFIG = {
     # ── paths ────────────────────────────────────────────────────────────────
     "image_dir":    "/content/drive/My Drive/LICENTA_COLAB ",          # trailing space is correct
     "mask_dir":     "/content/drive/My Drive/LICENTA_COLAB /masks",    # trailing space is correct
-    "logs_dir":     "/content/drive/My Drive/LICENTA_COLAB/logs",
+    "logs_dir":     "/tmp/tb_logs",                                    # local — fast, no Drive quota
     "results_dir":  "/content/drive/My Drive/LICENTA_COLAB/results",
     # ── training ─────────────────────────────────────────────────────────────
     "batch_size":          16,     # 16 + AMP fits T4 (14.6 GB); use 32 on A100
@@ -604,12 +604,6 @@ for epoch in range(start_epoch, CONFIG["epochs"] + 1):
     writer.add_scalar("val/precision",   stats["prec"],   epoch)
     writer.add_scalar("train/lr",        current_lr,      epoch)
 
-    # Weight histograms every 10 epochs
-    if epoch % 10 == 0:
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                writer.add_histogram(f"weights/{name}", param.data, epoch)
-
     # Sample predictions every 10 epochs
     if epoch % 10 == 0:
         try:
@@ -653,6 +647,12 @@ for epoch in range(start_epoch, CONFIG["epochs"] + 1):
             break
 
 writer.close()
+
+# Copy TensorBoard logs from /tmp to Drive for permanent storage
+drive_logs = "/content/drive/My Drive/LICENTA_COLAB/logs"
+os.makedirs(drive_logs, exist_ok=True)
+os.system(f"cp -r /tmp/tb_logs/. '{drive_logs}/'")
+print(f"✓ TensorBoard logs copied to Drive: {drive_logs}")
 
 # ============================================================================
 # FINAL SUMMARY
