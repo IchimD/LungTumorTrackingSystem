@@ -129,11 +129,12 @@ CONFIG = {
     "lr_min":           1e-6,      # floor for ReduceLROnPlateau
     "lr_patience":         10,     # epochs without Dice improvement before halving LR
     "lr_factor":          0.5,
-    "early_stop_patience": 40,     # survive ReduceLROnPlateau transient dips
-    "grad_clip":          1.0,     # max gradient norm
+    "early_stop_patience": 30,
+    "grad_clip":          1.0,
     "val_fraction":       0.15,
     "seed":                 42,
-    "num_workers":           2,    # data is pre-loaded; workers just do augmentation
+    "num_workers":           4,
+    "samples_per_patient":  10,    # random slices sampled per patient per epoch
     "augment":            True,
     "resume":             False,   # fresh start — previous checkpoint was bad
     # ── data ─────────────────────────────────────────────────────────────────
@@ -172,10 +173,13 @@ def safe_np_load(path: str) -> np.ndarray:
 
 class VolumeSliceDataset(Dataset):
     """
-    Enumerates EVERY positive slice from every volume at init time and pre-loads
-    them as resized 256×256 numpy arrays.  __getitem__ does only augmentation —
-    no file I/O during training.  This gives 10-30× more gradient updates per
-    epoch compared to the old one-slice-per-patient approach.
+    At init: scans each mask volume to record which slice indices are positive.
+    __getitem__: picks a FRESH RANDOM positive slice from the patient each call.
+
+    Because a different slice is chosen every time, the model can never memorise
+    specific images.  __len__ = num_patients × samples_per_patient controls how
+    many gradient updates happen per epoch without creating a fixed training set.
+    File I/O uses numpy mmap so only the needed slice is read from the SSD.
     """
 
     def __init__(
@@ -185,13 +189,16 @@ class VolumeSliceDataset(Dataset):
         patient_ids: Optional[List[str]] = None,
         augment_fn=None,
         background_ratio: float = 0.05,
+        samples_per_patient: int = 10,
     ) -> None:
-        self.augment_fn = augment_fn
-        # (img_256, msk_256, pid) — float32 numpy arrays, already resized
-        self._slices: List[Tuple[np.ndarray, np.ndarray, str]] = []
-        self._build_index(image_dir, mask_dir, patient_ids, background_ratio)
-        if not self._slices:
-            raise ValueError(f"No slices found in {image_dir!r} / {mask_dir!r}")
+        self.augment_fn          = augment_fn
+        self.background_ratio    = background_ratio
+        self.samples_per_patient = samples_per_patient
+        # (img_path, msk_path, pid, pos_z_list, neg_z_list)
+        self._patients: List[Tuple[str, str, str, List[int], List[int]]] = []
+        self._build_index(image_dir, mask_dir, patient_ids)
+        if not self._patients:
+            raise ValueError(f"No patients found in {image_dir!r} / {mask_dir!r}")
 
     @staticmethod
     def _find_candidates(image_dir, mask_dir, patient_ids):
@@ -225,63 +232,57 @@ class VolumeSliceDataset(Dataset):
             candidates.append((image_path, mask_path, pid))
         return candidates
 
-    def _build_index(self, image_dir, mask_dir, patient_ids, background_ratio):
+    def _build_index(self, image_dir, mask_dir, patient_ids):
         candidates = self._find_candidates(image_dir, mask_dir, patient_ids)
-        print(f"  [Dataset] Loading {len(candidates)} volumes — extracting every positive slice …")
-
-        pos: List[Tuple[np.ndarray, np.ndarray, str]] = []
-        neg: List[Tuple[np.ndarray, np.ndarray, str]] = []
-
-        for i, (img_path, msk_path, pid) in enumerate(candidates):
+        print(f"  [Dataset] Scanning {len(candidates)} mask volumes for positive slice indices …")
+        for img_path, msk_path, pid in candidates:
             try:
-                img_vol = safe_np_load(img_path).astype(np.float32)
-                msk_vol = normalize_mask(safe_np_load(msk_path)).astype(np.float32)
-
-                if img_vol.ndim == 2:   # single-slice file stored as 2-D
-                    img_vol = img_vol[np.newaxis]
+                msk_vol = normalize_mask(safe_np_load(msk_path))
+                if msk_vol.ndim == 2:
                     msk_vol = msk_vol[np.newaxis]
-
-                n_z = min(img_vol.shape[0], msk_vol.shape[0])
-                for z in range(n_z):
-                    img_s = img_vol[z]
-                    msk_s = msk_vol[z]
-                    sf    = (256 / img_s.shape[0], 256 / img_s.shape[1])
-                    img_r = zoom(img_s, sf, order=1)
-                    img_r = (img_r - img_r.min()) / (img_r.max() - img_r.min() + 1e-8)
-                    msk_r = (zoom(msk_s, sf, order=0) > 0.5).astype(np.float32)
-                    if msk_r.any():
-                        pos.append((img_r, msk_r, pid))
-                    else:
-                        neg.append((img_r, msk_r, pid))
-
+                pos = [z for z in range(msk_vol.shape[0]) if     msk_vol[z].any()]
+                neg = [z for z in range(msk_vol.shape[0]) if not msk_vol[z].any()]
+                if pos:
+                    self._patients.append((img_path, msk_path, pid, pos, neg))
             except Exception as e:
                 warnings.warn(f"  Skipping {pid}: {e}", UserWarning)
-
-            if (i + 1) % 100 == 0 or (i + 1) == len(candidates):
-                print(f"    {i+1}/{len(candidates)} volumes  "
-                      f"({len(pos)} positive, {len(neg)} background slices so far)")
-
-        n_bg = int(len(pos) * background_ratio / max(1.0 - background_ratio, 1e-8))
-        n_bg = min(n_bg, len(neg))
-        random.shuffle(neg)
-
-        self._slices = pos + neg[:n_bg]
-        random.shuffle(self._slices)
-        print(f"  [Dataset] {len(pos)} positive + {n_bg} background = {len(self._slices)} slices total")
+        n = len(self._patients) * self.samples_per_patient
+        print(f"  [Dataset] {len(self._patients)} patients × {self.samples_per_patient} "
+              f"samples/patient = {n} items/epoch")
 
     def __len__(self) -> int:
-        return len(self._slices)
+        return len(self._patients) * self.samples_per_patient
 
     def __getitem__(self, index: int):
-        img_r, msk_r, pid = self._slices[index]
-        img_t = torch.from_numpy(img_r.copy()).unsqueeze(0)
-        msk_t = torch.from_numpy(msk_r.copy()).unsqueeze(0)
+        img_path, msk_path, pid, pos_z, neg_z = self._patients[index % len(self._patients)]
+
+        z = (random.choice(neg_z) if neg_z and random.random() < self.background_ratio
+             else random.choice(pos_z))
+
+        # mmap: OS reads only the slice we need, not the whole volume
+        try:
+            img_vol = np.load(img_path, mmap_mode="r")
+            msk_vol = normalize_mask(np.load(msk_path, mmap_mode="r"))
+        except Exception:
+            img_vol = safe_np_load(img_path)
+            msk_vol = normalize_mask(safe_np_load(msk_path))
+
+        img_s = np.array(img_vol[z] if img_vol.ndim == 3 else img_vol, dtype=np.float32)
+        msk_s = np.array(msk_vol[z] if msk_vol.ndim == 3 else msk_vol, dtype=np.float32)
+
+        sf    = (256 / img_s.shape[0], 256 / img_s.shape[1])
+        img_r = zoom(img_s, sf, order=1)
+        img_r = (img_r - img_r.min()) / (img_r.max() - img_r.min() + 1e-8)
+        msk_r = (zoom(msk_s, sf, order=0) > 0.5).astype(np.float32)
+
+        img_t = torch.from_numpy(img_r).unsqueeze(0)
+        msk_t = torch.from_numpy(msk_r).unsqueeze(0)
         if self.augment_fn is not None:
             img_t, msk_t = self.augment_fn(img_t, msk_t)
         return img_t, msk_t, pid
 
     def get_patient_ids(self) -> List[str]:
-        return list(set(pid for _, _, pid in self._slices))
+        return [pid for _, _, pid, _, _ in self._patients]
 
 
 # ============================================================================
@@ -499,11 +500,13 @@ train_ds = VolumeSliceDataset(
     CONFIG["image_dir"], CONFIG["mask_dir"],
     patient_ids=train_ids, augment_fn=aug_fn,
     background_ratio=CONFIG["background_ratio"],
+    samples_per_patient=CONFIG["samples_per_patient"],
 )
 val_ds = VolumeSliceDataset(
     CONFIG["image_dir"], CONFIG["mask_dir"],
     patient_ids=val_ids,
-    background_ratio=0.1,   # slightly more background in val (for realistic metrics)
+    background_ratio=0.1,
+    samples_per_patient=CONFIG["samples_per_patient"],
 )
 print(f"  Train dataset: {len(train_ds)} items")
 print(f"  Val   dataset: {len(val_ds)} items")
