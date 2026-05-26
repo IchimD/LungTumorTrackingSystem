@@ -115,21 +115,25 @@ class BCEDiceLoss(nn.Module):
         pw = torch.tensor([self.pos_weight], device=logits.device, dtype=logits.dtype)
         probs = torch.sigmoid(logits)
         bce = torch.nn.functional.binary_cross_entropy_with_logits(logits, targets, pos_weight=pw)
-        inter = torch.sum(probs * targets)
-        dice = 1.0 - (2.0 * inter + 1e-6) / (torch.sum(probs) + torch.sum(targets) + 1e-6)
+        # per-sample dice: sum over spatial dims, mean over batch
+        # this prevents large-lesion patients from dominating the gradient
+        spatial = list(range(2, logits.ndim))
+        inter = (probs * targets).sum(dim=spatial)
+        denom = probs.sum(dim=spatial) + targets.sum(dim=spatial)
+        dice = (1.0 - (2.0 * inter + 1e-6) / (denom + 1e-6)).mean()
         return self.bce_weight * bce + (1.0 - self.bce_weight) * dice
 from src.training.metrics import iou_score, precision_score, sensitivity_score
 
 def per_sample_dice(logits: torch.Tensor, targets: torch.Tensor,
                     threshold: float = 0.5, eps: float = 1e-6) -> float:
-    """Per-sample Dice averaged over the batch — only counts samples with positive GT."""
+    """Per-sample Dice averaged only over samples that have positive ground-truth pixels."""
     preds   = (torch.sigmoid(logits) >= threshold).float()
     targets = targets.float()
-    # spatial dims: everything except batch dim 0
     spatial = list(range(1, preds.ndim))
-    inter   = (preds * targets).sum(dim=spatial)           # (B,)
-    union   = preds.sum(dim=spatial) + targets.sum(dim=spatial)  # (B,)
-    has_pos = union > 0                                    # at least one pixel predicted or GT
+    inter   = (preds * targets).sum(dim=spatial)                          # (B,)
+    union   = preds.sum(dim=spatial) + targets.sum(dim=spatial)           # (B,)
+    gt_sum  = targets.reshape(targets.shape[0], -1).sum(dim=1)            # (B,)
+    has_pos = gt_sum > 0                                                   # only real GT positives
     if not has_pos.any():
         return float('nan')
     dice = (2.0 * inter[has_pos] + eps) / (union[has_pos] + eps)
@@ -156,23 +160,23 @@ CONFIG = {
     "epochs":             120,
     "lr":               3e-4,      # starting LR; ReduceLROnPlateau halves it on plateau
     "lr_min":           1e-6,      # floor for ReduceLROnPlateau
-    "lr_patience":         10,     # epochs without Dice improvement before halving LR
+    "lr_patience":         15,     # epochs without Dice improvement before halving LR
     "lr_factor":          0.5,
-    "early_stop_patience": 30,
+    "early_stop_patience": 45,
     "grad_clip":          1.0,
     "val_fraction":       0.15,
     "seed":                 42,
     "num_workers":           4,
-    "samples_per_patient":  20,    # random slices sampled per patient per epoch
+    "samples_per_patient":  15,    # random slices sampled per patient per epoch
     "augment":            True,
-    "resume":             False,   # fresh start — previous checkpoint was bad
+    "resume":             False,   # fresh start
     # ── data ─────────────────────────────────────────────────────────────────
-    "background_ratio":   0.05,    # only 5 % background slices per epoch
-    "max_vol_pos_frac":   0.005,   # skip patients where >0.5% of volume is positive (filters bad masks)
+    "background_ratio":   0.0,     # train only on positive slices — prevents collapse to predict-nothing
+    "max_vol_pos_frac":   0.05,    # skip only truly absurd masks (>5% of volume); keep large lesions
     # ── model / loss ─────────────────────────────────────────────────────────
     "base_channels":        32,
-    "bce_weight":          0.3,
-    "pos_weight":          2.0,    # mild upweight for tumor pixels (10.0 caused severe over-segmentation)
+    "bce_weight":          0.2,    # 80% Dice weight — Dice handles imbalance better than BCE
+    "pos_weight":          1.0,    # symmetric BCE — let Dice loss handle imbalance
 }
 
 print("\n" + "=" * 70)
@@ -285,9 +289,9 @@ class VolumeSliceDataset(Dataset):
                     skipped_bad += 1
                     continue
 
-                # keep slices where mask exists but occupies < 10 % of slice area
+                # keep slices where mask exists; exclude only nearly-full-slice annotations (>80%)
                 pos = [z for z in range(msk_vol.shape[0])
-                       if msk_vol[z].any() and float(msk_vol[z].mean()) < 0.10]
+                       if msk_vol[z].any() and float(msk_vol[z].mean()) < 0.80]
                 neg = [z for z in range(msk_vol.shape[0]) if not msk_vol[z].any()]
                 if pos:
                     self._patients.append((img_path, msk_path, pid, pos, neg))
@@ -568,7 +572,7 @@ train_ds = VolumeSliceDataset(
 val_ds = VolumeSliceDataset(
     CONFIG["image_dir"], CONFIG["mask_dir"],
     patient_ids=val_ids,
-    background_ratio=0.1,
+    background_ratio=0.0,
     samples_per_patient=CONFIG["samples_per_patient"],
     max_vol_pos_frac=CONFIG["max_vol_pos_frac"],
 )
