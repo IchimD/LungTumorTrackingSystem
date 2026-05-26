@@ -118,7 +118,22 @@ class BCEDiceLoss(nn.Module):
         inter = torch.sum(probs * targets)
         dice = 1.0 - (2.0 * inter + 1e-6) / (torch.sum(probs) + torch.sum(targets) + 1e-6)
         return self.bce_weight * bce + (1.0 - self.bce_weight) * dice
-from src.training.metrics import dice_score, iou_score, precision_score, sensitivity_score
+from src.training.metrics import iou_score, precision_score, sensitivity_score
+
+def per_sample_dice(logits: torch.Tensor, targets: torch.Tensor,
+                    threshold: float = 0.5, eps: float = 1e-6) -> float:
+    """Per-sample Dice averaged over the batch — only counts samples with positive GT."""
+    preds   = (torch.sigmoid(logits) >= threshold).float()
+    targets = targets.float()
+    # spatial dims: everything except batch dim 0
+    spatial = list(range(1, preds.ndim))
+    inter   = (preds * targets).sum(dim=spatial)           # (B,)
+    union   = preds.sum(dim=spatial) + targets.sum(dim=spatial)  # (B,)
+    has_pos = union > 0                                    # at least one pixel predicted or GT
+    if not has_pos.any():
+        return float('nan')
+    dice = (2.0 * inter[has_pos] + eps) / (union[has_pos] + eps)
+    return float(dice.mean())
 from src.data.augmentation import default_training_augmentations
 from src.data.io import (
     SUPPORTED_EXTENSIONS,
@@ -148,15 +163,16 @@ CONFIG = {
     "val_fraction":       0.15,
     "seed":                 42,
     "num_workers":           4,
-    "samples_per_patient":  10,    # random slices sampled per patient per epoch
+    "samples_per_patient":  20,    # random slices sampled per patient per epoch
     "augment":            True,
     "resume":             False,   # fresh start — previous checkpoint was bad
     # ── data ─────────────────────────────────────────────────────────────────
     "background_ratio":   0.05,    # only 5 % background slices per epoch
+    "max_vol_pos_frac":   0.005,   # skip patients where >0.5% of volume is positive (filters bad masks)
     # ── model / loss ─────────────────────────────────────────────────────────
     "base_channels":        32,
     "bce_weight":          0.3,
-    "pos_weight":         10.0,    # tumor pixels weighted 10x in BCE (fixes 1300:1 imbalance)
+    "pos_weight":          2.0,    # mild upweight for tumor pixels (10.0 caused severe over-segmentation)
 }
 
 print("\n" + "=" * 70)
@@ -205,10 +221,12 @@ class VolumeSliceDataset(Dataset):
         augment_fn=None,
         background_ratio: float = 0.05,
         samples_per_patient: int = 10,
+        max_vol_pos_frac: float = 0.005,
     ) -> None:
         self.augment_fn          = augment_fn
         self.background_ratio    = background_ratio
         self.samples_per_patient = samples_per_patient
+        self.max_vol_pos_frac    = max_vol_pos_frac
         # (img_path, msk_path, pid, pos_z_list, neg_z_list)
         self._patients: List[Tuple[str, str, str, List[int], List[int]]] = []
         self._build_index(image_dir, mask_dir, patient_ids)
@@ -250,18 +268,36 @@ class VolumeSliceDataset(Dataset):
     def _build_index(self, image_dir, mask_dir, patient_ids):
         candidates = self._find_candidates(image_dir, mask_dir, patient_ids)
         print(f"  [Dataset] Scanning {len(candidates)} mask volumes for positive slice indices …")
+        skipped_bad, skipped_empty = 0, 0
         for img_path, msk_path, pid in candidates:
             try:
                 msk_vol = normalize_mask(safe_np_load(msk_path))
                 if msk_vol.ndim == 2:
                     msk_vol = msk_vol[np.newaxis]
-                pos = [z for z in range(msk_vol.shape[0]) if     msk_vol[z].any()]
+
+                # --- quality filter: skip volumes with unrealistically large annotations ---
+                total_vox = msk_vol.size
+                pos_vox   = int(msk_vol.sum())
+                vol_frac  = pos_vox / max(total_vox, 1)
+                if vol_frac > self.max_vol_pos_frac:
+                    print(f"  [Dataset] SKIP {pid[:30]}…: annotation={vol_frac:.3%} > "
+                          f"{self.max_vol_pos_frac:.2%} threshold (bad mask?)")
+                    skipped_bad += 1
+                    continue
+
+                # keep slices where mask exists but occupies < 10 % of slice area
+                pos = [z for z in range(msk_vol.shape[0])
+                       if msk_vol[z].any() and float(msk_vol[z].mean()) < 0.10]
                 neg = [z for z in range(msk_vol.shape[0]) if not msk_vol[z].any()]
                 if pos:
                     self._patients.append((img_path, msk_path, pid, pos, neg))
+                else:
+                    skipped_empty += 1
             except Exception as e:
                 warnings.warn(f"  Skipping {pid}: {e}", UserWarning)
         n = len(self._patients) * self.samples_per_patient
+        print(f"  [Dataset] {len(self._patients)} patients kept | "
+              f"{skipped_bad} skipped (bad mask) | {skipped_empty} skipped (no pos slices)")
         print(f"  [Dataset] {len(self._patients)} patients × {self.samples_per_patient} "
               f"samples/patient = {n} items/epoch")
 
@@ -400,7 +436,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, grad_clip, scal
 def evaluate(model, loader, criterion, device, scaler):
     model.eval()
     totals = dict(loss=0., dice=0., iou=0., sens=0., prec=0.)
-    count = 0
+    count, dice_valid = 0, 0
     with torch.no_grad():
         with tqdm(loader, desc="Val  ", leave=False) as pbar:
             for imgs, masks, _ in pbar:
@@ -409,13 +445,24 @@ def evaluate(model, loader, criterion, device, scaler):
                 with torch.amp.autocast("cuda", enabled=scaler.is_enabled()):
                     out = model(imgs)
                     totals["loss"] += criterion(out, masks).item()
-                totals["dice"] += dice_score(out, masks)
+                d = per_sample_dice(out, masks)
+                if not (d != d):  # skip NaN batches (all-background)
+                    totals["dice"] += d
+                    dice_valid += 1
                 totals["iou"]  += iou_score(out, masks)
                 totals["sens"] += sensitivity_score(out, masks)
                 totals["prec"] += precision_score(out, masks)
                 count += 1
-                pbar.set_postfix(dice=f"{totals['dice']/count:.4f}")
-    return {k: v / max(count, 1) for k, v in totals.items()}
+                cur_dice = totals["dice"] / max(dice_valid, 1)
+                pbar.set_postfix(dice=f"{cur_dice:.4f}")
+    n = max(count, 1)
+    return {
+        "loss": totals["loss"] / n,
+        "dice": totals["dice"] / max(dice_valid, 1),
+        "iou":  totals["iou"]  / n,
+        "sens": totals["sens"] / n,
+        "prec": totals["prec"] / n,
+    }
 
 
 # ============================================================================
@@ -516,12 +563,14 @@ train_ds = VolumeSliceDataset(
     patient_ids=train_ids, augment_fn=aug_fn,
     background_ratio=CONFIG["background_ratio"],
     samples_per_patient=CONFIG["samples_per_patient"],
+    max_vol_pos_frac=CONFIG["max_vol_pos_frac"],
 )
 val_ds = VolumeSliceDataset(
     CONFIG["image_dir"], CONFIG["mask_dir"],
     patient_ids=val_ids,
     background_ratio=0.1,
     samples_per_patient=CONFIG["samples_per_patient"],
+    max_vol_pos_frac=CONFIG["max_vol_pos_frac"],
 )
 print(f"  Train dataset: {len(train_ds)} items")
 print(f"  Val   dataset: {len(val_ds)} items")
