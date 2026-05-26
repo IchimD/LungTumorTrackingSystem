@@ -125,11 +125,11 @@ CONFIG = {
     # ── training ─────────────────────────────────────────────────────────────
     "batch_size":          64,     # RTX 4090 24 GB — 64 fits easily at 256×256
     "epochs":             120,
-    "lr":               3e-4,      # lower start; scheduler handles decay
+    "lr":               3e-4,      # starting LR; ReduceLROnPlateau halves it on plateau
     "lr_min":           1e-6,      # floor for ReduceLROnPlateau
-    "lr_patience":         10,     # more patience before halving LR
+    "lr_patience":         10,     # epochs without Dice improvement before halving LR
     "lr_factor":          0.5,
-    "early_stop_patience": 30,     # must be > T_0=20 to survive one full cosine cycle
+    "early_stop_patience": 25,     # stop if no improvement for 25 epochs
     "grad_clip":          1.0,     # max gradient norm
     "val_fraction":       0.15,
     "seed":                 42,
@@ -553,9 +553,13 @@ print(f"Device: {device}")
 model     = UNet2D(in_channels=1, out_channels=1,
                    base_channels=CONFIG["base_channels"]).to(device)
 criterion = BCEDiceLoss(bce_weight=CONFIG["bce_weight"])
-optimizer = torch.optim.AdamW(model.parameters(), lr=CONFIG["lr"], weight_decay=1e-4)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    optimizer, T_0=20, T_mult=2, eta_min=CONFIG["lr_min"],
+optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG["lr"])
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode="max",
+    patience=CONFIG["lr_patience"],
+    factor=CONFIG["lr_factor"],
+    min_lr=CONFIG["lr_min"],
 )
 writer = SummaryWriter(log_dir=CONFIG["logs_dir"])
 scaler = torch.amp.GradScaler("cuda", enabled=torch.cuda.is_available())
@@ -563,8 +567,8 @@ scaler = torch.amp.GradScaler("cuda", enabled=torch.cuda.is_available())
 n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"✓ UNet2D  base_channels={CONFIG['base_channels']}  params={n_params:,}")
 print(f"✓ Loss: BCEDiceLoss  bce_weight={CONFIG['bce_weight']}")
-print(f"✓ Optimiser: AdamW  lr={CONFIG['lr']}  weight_decay=1e-4")
-print(f"✓ Scheduler: CosineAnnealingWarmRestarts  T_0=20  T_mult=2")
+print(f"✓ Optimiser: Adam  lr={CONFIG['lr']}")
+print(f"✓ Scheduler: ReduceLROnPlateau  patience={CONFIG['lr_patience']}  factor={CONFIG['lr_factor']}")
 print(f"✓ AMP: enabled={torch.cuda.is_available()}")
 
 # Log hyperparameters
@@ -605,8 +609,8 @@ for epoch in range(start_epoch, CONFIG["epochs"] + 1):
     train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, CONFIG["grad_clip"], scaler)
     stats      = evaluate(model, val_loader, criterion, device, scaler)
 
-    # Update LR scheduler
-    scheduler.step(epoch)
+    # Update LR scheduler — ReduceLROnPlateau needs the metric, not the epoch
+    scheduler.step(stats["dice"])
     current_lr = optimizer.param_groups[0]["lr"]
 
     # Console log
