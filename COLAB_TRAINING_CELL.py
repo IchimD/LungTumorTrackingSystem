@@ -103,7 +103,21 @@ from IPython.display import clear_output, display
 import glob
 
 from src.models.unet import UNet2D
-from src.training.loss import BCEDiceLoss
+# BCEDiceLoss defined inline so this cell never depends on the repo version being cached
+import torch.nn as nn
+class BCEDiceLoss(nn.Module):
+    def __init__(self, bce_weight=0.5, pos_weight=1.0):
+        super().__init__()
+        self.bce_weight = bce_weight
+        self.pos_weight = pos_weight
+    def forward(self, logits, targets):
+        targets = targets.float()
+        pw = torch.tensor([self.pos_weight], device=logits.device, dtype=logits.dtype)
+        probs = torch.sigmoid(logits)
+        bce = torch.nn.functional.binary_cross_entropy_with_logits(logits, targets, pos_weight=pw)
+        inter = torch.sum(probs * targets)
+        dice = 1.0 - (2.0 * inter + 1e-6) / (torch.sum(probs) + torch.sum(targets) + 1e-6)
+        return self.bce_weight * bce + (1.0 - self.bce_weight) * dice
 from src.training.metrics import dice_score, iou_score, precision_score, sensitivity_score
 from src.data.augmentation import default_training_augmentations
 from src.data.io import (
