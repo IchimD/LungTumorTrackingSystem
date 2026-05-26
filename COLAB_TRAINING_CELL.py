@@ -103,29 +103,7 @@ from IPython.display import clear_output, display
 import glob
 
 from src.models.unet import UNet2D
-
-
-class TverskyFocalLoss(torch.nn.Module):
-    """Tversky + Focal loss for small-tumor segmentation.
-    beta=0.7 heavily penalises false negatives (missed tumors)."""
-    def __init__(self, alpha=0.3, beta=0.7, gamma=2.0, smooth=1.0):
-        super().__init__()
-        self.alpha = alpha
-        self.beta  = beta
-        self.gamma = gamma
-        self.smooth = smooth
-
-    def forward(self, pred, target):
-        p  = torch.sigmoid(pred)
-        tp = (p * target).sum(dim=(1, 2, 3))
-        fp = (p * (1 - target)).sum(dim=(1, 2, 3))
-        fn = ((1 - p) * target).sum(dim=(1, 2, 3))
-        tversky = (tp + self.smooth) / (tp + self.alpha*fp + self.beta*fn + self.smooth)
-        tversky_loss = 1 - tversky.mean()
-        # Use with_logits variant — safe with AMP autocast
-        bce   = torch.nn.functional.binary_cross_entropy_with_logits(pred, target, reduction="none")
-        focal = ((1 - torch.exp(-bce)) ** self.gamma * bce).mean()
-        return tversky_loss + 0.5 * focal
+from src.training.loss import BCEDiceLoss
 from src.training.metrics import dice_score, iou_score, precision_score, sensitivity_score
 from src.data.augmentation import default_training_augmentations
 from src.data.io import (
@@ -151,7 +129,7 @@ CONFIG = {
     "lr_min":           1e-6,      # floor for ReduceLROnPlateau
     "lr_patience":         10,     # more patience before halving LR
     "lr_factor":          0.5,
-    "early_stop_patience": 25,     # more patience — bigger dataset needs more time
+    "early_stop_patience": 30,     # must be > T_0=20 to survive one full cosine cycle
     "grad_clip":          1.0,     # max gradient norm
     "val_fraction":       0.15,
     "seed":                 42,
@@ -574,7 +552,7 @@ print(f"Device: {device}")
 
 model     = UNet2D(in_channels=1, out_channels=1,
                    base_channels=CONFIG["base_channels"]).to(device)
-criterion = TverskyFocalLoss(alpha=0.3, beta=0.7, gamma=2.0)
+criterion = BCEDiceLoss(bce_weight=CONFIG["bce_weight"])
 optimizer = torch.optim.AdamW(model.parameters(), lr=CONFIG["lr"], weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
     optimizer, T_0=20, T_mult=2, eta_min=CONFIG["lr_min"],
@@ -584,7 +562,7 @@ scaler = torch.amp.GradScaler("cuda", enabled=torch.cuda.is_available())
 
 n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"✓ UNet2D  base_channels={CONFIG['base_channels']}  params={n_params:,}")
-print(f"✓ Loss: TverskyFocalLoss  alpha=0.3  beta=0.7  gamma=2.0")
+print(f"✓ Loss: BCEDiceLoss  bce_weight={CONFIG['bce_weight']}")
 print(f"✓ Optimiser: AdamW  lr={CONFIG['lr']}  weight_decay=1e-4")
 print(f"✓ Scheduler: CosineAnnealingWarmRestarts  T_0=20  T_mult=2")
 print(f"✓ AMP: enabled={torch.cuda.is_available()}")
