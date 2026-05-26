@@ -122,7 +122,8 @@ class TverskyFocalLoss(torch.nn.Module):
         fn = ((1 - p) * target).sum(dim=(1, 2, 3))
         tversky = (tp + self.smooth) / (tp + self.alpha*fp + self.beta*fn + self.smooth)
         tversky_loss = 1 - tversky.mean()
-        bce   = torch.nn.functional.binary_cross_entropy(p, target, reduction="none")
+        # Use with_logits variant — safe with AMP autocast
+        bce   = torch.nn.functional.binary_cross_entropy_with_logits(pred, target, reduction="none")
         focal = ((1 - torch.exp(-bce)) ** self.gamma * bce).mean()
         return tversky_loss + 0.5 * focal
 from src.training.metrics import dice_score, iou_score, precision_score, sensitivity_score
