@@ -544,7 +544,7 @@ print(f"Device: {device}")
 model     = UNet2D(in_channels=1, out_channels=1,
                    base_channels=CONFIG["base_channels"]).to(device)
 criterion = BCEDiceLoss(bce_weight=CONFIG["bce_weight"])
-optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG["lr"], weight_decay=1e-4)
+optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG["lr"], weight_decay=1e-3)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer,
     mode="max",
@@ -558,7 +558,7 @@ scaler = torch.amp.GradScaler("cuda", enabled=torch.cuda.is_available())
 n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"✓ UNet2D  base_channels={CONFIG['base_channels']}  params={n_params:,}")
 print(f"✓ Loss: BCEDiceLoss  bce_weight={CONFIG['bce_weight']}")
-print(f"✓ Optimiser: Adam  lr={CONFIG['lr']}  weight_decay=1e-4")
+print(f"✓ Optimiser: Adam  lr={CONFIG['lr']}  weight_decay=1e-3")
 print(f"✓ Scheduler: ReduceLROnPlateau  patience={CONFIG['lr_patience']}  factor={CONFIG['lr_factor']}")
 print(f"✓ AMP: enabled={torch.cuda.is_available()}")
 
