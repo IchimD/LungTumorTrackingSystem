@@ -95,7 +95,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 from tqdm import tqdm
-from scipy.ndimage import zoom
+from scipy.ndimage import zoom, map_coordinates, gaussian_filter
 import matplotlib
 matplotlib.use("Agg")          # non-interactive backend — safe in Colab
 import matplotlib.pyplot as plt
@@ -103,7 +103,28 @@ from IPython.display import clear_output, display
 import glob
 
 from src.models.unet import UNet2D
-from src.training.loss import BCEDiceLoss
+
+
+class TverskyFocalLoss(torch.nn.Module):
+    """Tversky + Focal loss for small-tumor segmentation.
+    beta=0.7 heavily penalises false negatives (missed tumors)."""
+    def __init__(self, alpha=0.3, beta=0.7, gamma=2.0, smooth=1.0):
+        super().__init__()
+        self.alpha = alpha
+        self.beta  = beta
+        self.gamma = gamma
+        self.smooth = smooth
+
+    def forward(self, pred, target):
+        p  = torch.sigmoid(pred)
+        tp = (p * target).sum(dim=(1, 2, 3))
+        fp = (p * (1 - target)).sum(dim=(1, 2, 3))
+        fn = ((1 - p) * target).sum(dim=(1, 2, 3))
+        tversky = (tp + self.smooth) / (tp + self.alpha*fp + self.beta*fn + self.smooth)
+        tversky_loss = 1 - tversky.mean()
+        bce   = torch.nn.functional.binary_cross_entropy(p, target, reduction="none")
+        focal = ((1 - torch.exp(-bce)) ** self.gamma * bce).mean()
+        return tversky_loss + 0.5 * focal
 from src.training.metrics import dice_score, iou_score, precision_score, sensitivity_score
 from src.data.augmentation import default_training_augmentations
 from src.data.io import (
@@ -305,6 +326,21 @@ def build_augmentation_fn(enable: bool):
             alpha = random.uniform(0.8, 1.2)   # contrast
             beta  = random.uniform(-0.1, 0.1)  # brightness
             img = (img * alpha + beta).clamp(0.0, 1.0)
+
+        # Elastic deformation — gold standard for medical image augmentation
+        if random.random() < 0.3:
+            img_np = img.squeeze(0).numpy()
+            msk_np = mask.squeeze(0).numpy()
+            shape  = img_np.shape
+            dx = gaussian_filter(np.random.randn(*shape) * 80, sigma=9)
+            dy = gaussian_filter(np.random.randn(*shape) * 80, sigma=9)
+            gx, gy = np.meshgrid(np.arange(shape[1]), np.arange(shape[0]))
+            coords = [np.clip((gy + dy).ravel(), 0, shape[0]-1),
+                      np.clip((gx + dx).ravel(), 0, shape[1]-1)]
+            img_np = map_coordinates(img_np, coords, order=1, mode="reflect").reshape(shape)
+            msk_np = (map_coordinates(msk_np, coords, order=0, mode="reflect").reshape(shape) > 0.5).astype(np.float32)
+            img  = torch.from_numpy(img_np).unsqueeze(0)
+            mask = torch.from_numpy(msk_np).unsqueeze(0)
 
         return img, mask
 
@@ -537,23 +573,19 @@ print(f"Device: {device}")
 
 model     = UNet2D(in_channels=1, out_channels=1,
                    base_channels=CONFIG["base_channels"]).to(device)
-criterion = BCEDiceLoss(bce_weight=CONFIG["bce_weight"])
-optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG["lr"])
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer,
-    mode="max",            # maximise val Dice
-    factor=CONFIG["lr_factor"],
-    patience=CONFIG["lr_patience"],
-    min_lr=CONFIG["lr_min"],
+criterion = TverskyFocalLoss(alpha=0.3, beta=0.7, gamma=2.0)
+optimizer = torch.optim.AdamW(model.parameters(), lr=CONFIG["lr"], weight_decay=1e-4)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    optimizer, T_0=20, T_mult=2, eta_min=CONFIG["lr_min"],
 )
 writer = SummaryWriter(log_dir=CONFIG["logs_dir"])
 scaler = torch.amp.GradScaler("cuda", enabled=torch.cuda.is_available())
 
 n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"✓ UNet2D  base_channels={CONFIG['base_channels']}  params={n_params:,}")
-print(f"✓ Loss: BCEDiceLoss  bce_weight={CONFIG['bce_weight']}")
-print(f"✓ Optimiser: Adam  lr={CONFIG['lr']}")
-print(f"✓ Scheduler: ReduceLROnPlateau  patience={CONFIG['lr_patience']}  factor={CONFIG['lr_factor']}")
+print(f"✓ Loss: TverskyFocalLoss  alpha=0.3  beta=0.7  gamma=2.0")
+print(f"✓ Optimiser: AdamW  lr={CONFIG['lr']}  weight_decay=1e-4")
+print(f"✓ Scheduler: CosineAnnealingWarmRestarts  T_0=20  T_mult=2")
 print(f"✓ AMP: enabled={torch.cuda.is_available()}")
 
 # Log hyperparameters
@@ -595,7 +627,7 @@ for epoch in range(start_epoch, CONFIG["epochs"] + 1):
     stats      = evaluate(model, val_loader, criterion, device, scaler)
 
     # Update LR scheduler
-    scheduler.step(stats["dice"])
+    scheduler.step(epoch)
     current_lr = optimizer.param_groups[0]["lr"]
 
     # Console log
