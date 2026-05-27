@@ -706,7 +706,7 @@ n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"✓ smp.UnetPlusPlus  encoder=resnet50(imagenet) 2.5D(3-slice)  params={n_params:,}")
 print(f"✓ Loss: BCEDiceLoss  bce_weight={CONFIG['bce_weight']}  pos_weight={CONFIG['pos_weight']}")
 print(f"✓ Optimiser: Adam  lr={CONFIG['lr']}  weight_decay=1e-4")
-print(f"✓ Scheduler: ReduceLROnPlateau  patience={CONFIG['lr_patience']}  factor={CONFIG['lr_factor']}")
+print(f"✓ Scheduler: CosineAnnealingWarmRestarts  T0={CONFIG['cosine_T0']}  eta_min={CONFIG['lr_min']}")
 print(f"✓ AMP: enabled={torch.cuda.is_available()}")
 
 # Log hyperparameters
@@ -807,6 +807,8 @@ for epoch in range(start_epoch, CONFIG["epochs"] + 1):
             checkpoint_path,
         )
         print(f"  ✓ New best — checkpoint saved (dice={best_val_dice:.4f})")
+        if not IS_COLAB:
+            os.system(f"rclone copy {checkpoint_path} 'gdrive:Licenta/DATASET/results/' --no-traverse > /dev/null 2>&1 &")
     else:
         no_improve += 1
         if no_improve >= CONFIG["early_stop_patience"]:
