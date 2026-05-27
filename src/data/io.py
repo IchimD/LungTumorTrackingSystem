@@ -99,7 +99,7 @@ def patient_id_from_filename(path: str) -> str:
         Extracted patient ID.
     """
     stem = os.path.splitext(os.path.basename(path))[0]
-    return stem.split("_")[0]
+    return stem
 
 
 def find_matching_mask(image_path: str, mask_dir: str, extensions: Sequence[str] = SUPPORTED_EXTENSIONS) -> Optional[str]:
