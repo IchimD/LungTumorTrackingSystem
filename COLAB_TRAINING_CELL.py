@@ -165,7 +165,7 @@ CONFIG = {
     "grad_clip":          1.0,
     "val_fraction":       0.15,
     "seed":                 42,
-    "num_workers":           4,
+    "num_workers":           0,
     "samples_per_patient":  15,    # random slices sampled per patient per epoch
     "augment":            True,
     "resume":             False,   # fresh start
