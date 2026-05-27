@@ -6,7 +6,9 @@
       "Bash(git push *)",
       "Bash(git commit -m 'Fix TverskyFocalLoss AMP compatibility: use bce_with_logits *)",
       "Bash(git commit -m 'Revert to BCEDiceLoss; keep AdamW+CosineAnnealing+elastic deform *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(dir \"E:\\\\LICENTA2\\\\Task06_Lung\")",
+      "Bash(dir \"E:\\\\LICENTA2\\\\Task06_Lung\\\\imagesTr\")"
     ]
   }
 }
