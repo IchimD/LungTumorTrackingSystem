@@ -159,9 +159,9 @@ CONFIG = {
     "epochs":             150,
     "lr":               3e-4,      # starting LR; ReduceLROnPlateau halves it on plateau
     "lr_min":           1e-6,      # floor for ReduceLROnPlateau
-    "lr_patience":         12,     # epochs without Dice improvement before halving LR
+    "lr_patience":         15,     # epochs without Dice improvement before halving LR
     "lr_factor":          0.5,
-    "early_stop_patience": 40,
+    "early_stop_patience": 50,
     "grad_clip":          1.0,
     "val_fraction":       0.20,    # 12 val patients — more reliable metric
     "seed":                 42,
@@ -338,6 +338,47 @@ class VolumeSliceDataset(Dataset):
         return [pid for _, _, pid, _, _ in self._patients]
 
 
+class AllSlicesDataset(Dataset):
+    """Deterministic validation dataset — enumerates ALL positive slices once at init.
+    No random sampling → stable, reproducible val dice every epoch."""
+
+    def __init__(self, image_dir, mask_dir, patient_ids=None, max_vol_pos_frac=0.05):
+        self._items = []
+        candidates = VolumeSliceDataset._find_candidates(image_dir, mask_dir, patient_ids)
+        for img_path, msk_path, pid in candidates:
+            try:
+                msk_vol = normalize_mask(safe_np_load(msk_path))
+                if msk_vol.ndim == 2:
+                    msk_vol = msk_vol[np.newaxis]
+                if float(msk_vol.sum()) / max(msk_vol.size, 1) > max_vol_pos_frac:
+                    continue
+                for z in range(msk_vol.shape[0]):
+                    if msk_vol[z].any() and float(msk_vol[z].mean()) < 0.80:
+                        self._items.append((img_path, msk_path, z))
+            except Exception as e:
+                warnings.warn(f"Skipping {pid}: {e}")
+        print(f"  [ValDataset] {len(self._items)} positive slices (deterministic)")
+
+    def __len__(self):
+        return len(self._items)
+
+    def __getitem__(self, idx):
+        img_path, msk_path, z = self._items[idx]
+        try:
+            img_vol = np.load(img_path, mmap_mode="r")
+            msk_vol = normalize_mask(np.load(msk_path, mmap_mode="r"))
+        except Exception:
+            img_vol = safe_np_load(img_path)
+            msk_vol = normalize_mask(safe_np_load(msk_path))
+        img_s = np.array(img_vol[z], dtype=np.float32)
+        msk_s = np.array(msk_vol[z], dtype=np.float32)
+        sf = (256 / img_s.shape[0], 256 / img_s.shape[1])
+        img_r = zoom(img_s, sf, order=1)
+        img_r = (img_r - img_r.min()) / (img_r.max() - img_r.min() + 1e-8)
+        msk_r = (zoom(msk_s, sf, order=0) > 0.5).astype(np.float32)
+        return torch.from_numpy(img_r).unsqueeze(0), torch.from_numpy(msk_r).unsqueeze(0), ""
+
+
 # ============================================================================
 # AUGMENTATION (stronger than v1)
 # ============================================================================
@@ -367,7 +408,7 @@ def build_augmentation_fn(enable: bool):
             mask = torch.rot90(mask, k, dims=[1, 2])
 
         # Elastic deformation — biggest boost for medical segmentation
-        if random.random() < 0.5:
+        if random.random() < 0.3:
             img_np, msk_np = _elastic(img.squeeze().numpy(), mask.squeeze().numpy())
             img  = torch.from_numpy(img_np).unsqueeze(0)
             mask = torch.from_numpy(msk_np).unsqueeze(0)
@@ -584,11 +625,9 @@ train_ds = VolumeSliceDataset(
     samples_per_patient=CONFIG["samples_per_patient"],
     max_vol_pos_frac=CONFIG["max_vol_pos_frac"],
 )
-val_ds = VolumeSliceDataset(
+val_ds = AllSlicesDataset(
     CONFIG["image_dir"], CONFIG["mask_dir"],
     patient_ids=val_ids,
-    background_ratio=0.0,
-    samples_per_patient=CONFIG["samples_per_patient"],
     max_vol_pos_frac=CONFIG["max_vol_pos_frac"],
 )
 print(f"  Train dataset: {len(train_ds)} items")
@@ -633,7 +672,6 @@ model     = smp.Unet(
     in_channels=1,
     classes=1,
     activation=None,
-    decoder_dropout=0.3,
 ).to(device)
 criterion = BCEDiceLoss(bce_weight=CONFIG["bce_weight"], pos_weight=CONFIG["pos_weight"])
 optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG["lr"], weight_decay=1e-4)
