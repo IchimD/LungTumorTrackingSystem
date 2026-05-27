@@ -50,7 +50,7 @@ if IS_COLAB:
         "pip install -q torch torchvision torchaudio "
         "--index-url https://download.pytorch.org/whl/cu118"
     )
-os.system("pip install -q SimpleITK scipy tqdm tensorboard matplotlib")
+os.system("pip install -q SimpleITK scipy tqdm tensorboard matplotlib segmentation-models-pytorch")
 
 # ============================================================================
 # STEP 2 — Mount Google Drive (Colab only — Vast.ai uses local /workspace)
@@ -102,8 +102,7 @@ import matplotlib.pyplot as plt
 from IPython.display import clear_output, display
 import glob
 
-from src.models.unet import UNet2D
-# BCEDiceLoss defined inline so this cell never depends on the repo version being cached
+import segmentation_models_pytorch as smp
 import torch.nn as nn
 class BCEDiceLoss(nn.Module):
     def __init__(self, bce_weight=0.5, pos_weight=1.0):
@@ -174,7 +173,6 @@ CONFIG = {
     "background_ratio":   0.0,     # train only on positive slices — prevents collapse to predict-nothing
     "max_vol_pos_frac":   0.05,    # skip only truly absurd masks (>5% of volume); keep large lesions
     # ── model / loss ─────────────────────────────────────────────────────────
-    "base_channels":        32,
     "bce_weight":          0.2,    # 80% Dice weight — Dice handles imbalance better than BCE
     "pos_weight":          1.0,    # symmetric BCE — let Dice loss handle imbalance
 }
@@ -612,8 +610,13 @@ if torch.cuda.is_available():
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
 
-model     = UNet2D(in_channels=1, out_channels=1,
-                   base_channels=CONFIG["base_channels"]).to(device)
+model     = smp.Unet(
+    encoder_name="resnet34",
+    encoder_weights="imagenet",
+    in_channels=1,
+    classes=1,
+    activation=None,
+).to(device)
 criterion = BCEDiceLoss(bce_weight=CONFIG["bce_weight"], pos_weight=CONFIG["pos_weight"])
 optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG["lr"], weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -627,7 +630,7 @@ writer = SummaryWriter(log_dir=CONFIG["logs_dir"])
 scaler = torch.amp.GradScaler("cuda", enabled=torch.cuda.is_available())
 
 n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-print(f"✓ UNet2D  base_channels={CONFIG['base_channels']}  params={n_params:,}")
+print(f"✓ smp.Unet  encoder=resnet34(imagenet)  params={n_params:,}")
 print(f"✓ Loss: BCEDiceLoss  bce_weight={CONFIG['bce_weight']}  pos_weight={CONFIG['pos_weight']}")
 print(f"✓ Optimiser: Adam  lr={CONFIG['lr']}  weight_decay=1e-4")
 print(f"✓ Scheduler: ReduceLROnPlateau  patience={CONFIG['lr_patience']}  factor={CONFIG['lr_factor']}")
