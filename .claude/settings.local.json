@@ -8,7 +8,9 @@
       "Bash(git commit -m 'Revert to BCEDiceLoss; keep AdamW+CosineAnnealing+elastic deform *)",
       "Bash(git commit *)",
       "Bash(dir \"E:\\\\LICENTA2\\\\Task06_Lung\")",
-      "Bash(dir \"E:\\\\LICENTA2\\\\Task06_Lung\\\\imagesTr\")"
+      "Bash(dir \"E:\\\\LICENTA2\\\\Task06_Lung\\\\imagesTr\")",
+      "Bash(rclone version *)",
+      "Bash(rclone authorize *)"
     ]
   }
 }
