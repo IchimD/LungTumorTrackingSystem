@@ -155,18 +155,17 @@ CONFIG = {
     "logs_dir":    "/tmp/tb_logs",
     "results_dir": "/content/drive/My Drive/LICENTA_COLAB/results" if IS_COLAB else "/workspace/results",
     # ── training ─────────────────────────────────────────────────────────────
-    "batch_size":          32,     # smaller batch = noisier gradients = better generalization
-    "epochs":             150,
-    "lr":               3e-4,      # starting LR; ReduceLROnPlateau halves it on plateau
-    "lr_min":           1e-6,      # floor for ReduceLROnPlateau
-    "lr_patience":         15,     # epochs without Dice improvement before halving LR
-    "lr_factor":          0.5,
-    "early_stop_patience": 50,
+    "batch_size":          32,
+    "epochs":             200,
+    "lr":               3e-4,
+    "lr_min":           1e-6,
+    "cosine_T0":           50,     # CosineAnnealingWarmRestarts period
+    "early_stop_patience": 60,
     "grad_clip":          1.0,
-    "val_fraction":       0.20,    # 12 val patients — more reliable metric
+    "val_fraction":       0.20,
     "seed":                 42,
     "num_workers":           0,
-    "samples_per_patient":  30,    # more diverse sampling per epoch
+    "samples_per_patient":  40,
     "augment":            True,
     "resume":             False,   # fresh start
     # ── data ─────────────────────────────────────────────────────────────────
@@ -685,7 +684,7 @@ if torch.cuda.is_available():
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
 
-model     = smp.Unet(
+model     = smp.UnetPlusPlus(
     encoder_name="resnet50",
     encoder_weights="imagenet",
     in_channels=3,
@@ -694,18 +693,17 @@ model     = smp.Unet(
 ).to(device)
 criterion = BCEDiceLoss(bce_weight=CONFIG["bce_weight"], pos_weight=CONFIG["pos_weight"])
 optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG["lr"], weight_decay=1e-4)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
     optimizer,
-    mode="max",
-    patience=CONFIG["lr_patience"],
-    factor=CONFIG["lr_factor"],
-    min_lr=CONFIG["lr_min"],
+    T_0=CONFIG["cosine_T0"],
+    T_mult=1,
+    eta_min=CONFIG["lr_min"],
 )
 writer = SummaryWriter(log_dir=CONFIG["logs_dir"])
 scaler = torch.amp.GradScaler("cuda", enabled=torch.cuda.is_available())
 
 n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-print(f"✓ smp.Unet  encoder=resnet50(imagenet) 2.5D(3-slice)  params={n_params:,}")
+print(f"✓ smp.UnetPlusPlus  encoder=resnet50(imagenet) 2.5D(3-slice)  params={n_params:,}")
 print(f"✓ Loss: BCEDiceLoss  bce_weight={CONFIG['bce_weight']}  pos_weight={CONFIG['pos_weight']}")
 print(f"✓ Optimiser: Adam  lr={CONFIG['lr']}  weight_decay=1e-4")
 print(f"✓ Scheduler: ReduceLROnPlateau  patience={CONFIG['lr_patience']}  factor={CONFIG['lr_factor']}")
@@ -749,8 +747,7 @@ for epoch in range(start_epoch, CONFIG["epochs"] + 1):
     train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, CONFIG["grad_clip"], scaler)
     stats      = evaluate(model, val_loader, criterion, device, scaler)
 
-    # Update LR scheduler — ReduceLROnPlateau needs the metric, not the epoch
-    scheduler.step(stats["dice"])
+    scheduler.step(epoch)
     current_lr = optimizer.param_groups[0]["lr"]
 
     # Console log
@@ -846,6 +843,45 @@ else:
     os.system(f"rclone copy /workspace/results/ 'gdrive:LICENTA_COLAB/results/' --progress")
     os.system(f"rclone copy /tmp/tb_logs/ 'gdrive:LICENTA_COLAB/logs/' --progress")
     print("✓ Results and TensorBoard logs synced to Google Drive")
+
+# ============================================================================
+# TTA EVALUATION — load best checkpoint, predict with 4 augmented versions
+# ============================================================================
+print("\n" + "=" * 70)
+print("TTA EVALUATION (best checkpoint + 4-flip ensemble)")
+print("=" * 70)
+
+try:
+    ckpt = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+    tta_dice_total, tta_count = 0.0, 0
+    with torch.no_grad():
+        for imgs, masks, _ in val_loader:
+            imgs  = imgs.to(device, dtype=torch.float32)
+            masks = masks.to(device, dtype=torch.float32)
+            # 4 augmented predictions: original, h-flip, v-flip, both
+            preds = []
+            for flip_dims in [[], [3], [2], [2, 3]]:
+                x = imgs.flip(flip_dims) if flip_dims else imgs
+                p = torch.sigmoid(model(x))
+                if flip_dims:
+                    p = p.flip(flip_dims)
+                preds.append(p)
+            avg_pred = torch.stack(preds, dim=0).mean(dim=0)
+            # compute dice from averaged probability map
+            gt   = masks.reshape(masks.shape[0], -1)
+            pred = avg_pred.reshape(avg_pred.shape[0], -1)
+            has_pos = gt.sum(dim=1) > 0
+            if has_pos.any():
+                inter = (pred[has_pos] * gt[has_pos]).sum(dim=1)
+                denom = pred[has_pos].sum(dim=1) + gt[has_pos].sum(dim=1)
+                tta_dice_total += float(((2*inter+1e-6)/(denom+1e-6)).mean())
+                tta_count += 1
+    tta_dice = tta_dice_total / max(tta_count, 1)
+    print(f"  TTA Dice (4-flip ensemble): {tta_dice:.4f}  (vs best single {best_val_dice:.4f})")
+except Exception as e:
+    print(f"  TTA failed: {e}")
 
 # ============================================================================
 # FINAL SUMMARY
