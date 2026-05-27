@@ -155,18 +155,18 @@ CONFIG = {
     "logs_dir":    "/tmp/tb_logs",
     "results_dir": "/content/drive/My Drive/LICENTA_COLAB/results" if IS_COLAB else "/workspace/results",
     # ── training ─────────────────────────────────────────────────────────────
-    "batch_size":          64,     # RTX 4090 24 GB — 64 fits easily at 256×256
-    "epochs":             120,
+    "batch_size":          32,     # smaller batch = noisier gradients = better generalization
+    "epochs":             150,
     "lr":               3e-4,      # starting LR; ReduceLROnPlateau halves it on plateau
     "lr_min":           1e-6,      # floor for ReduceLROnPlateau
-    "lr_patience":         15,     # epochs without Dice improvement before halving LR
+    "lr_patience":         12,     # epochs without Dice improvement before halving LR
     "lr_factor":          0.5,
-    "early_stop_patience": 45,
+    "early_stop_patience": 40,
     "grad_clip":          1.0,
-    "val_fraction":       0.15,
+    "val_fraction":       0.20,    # 12 val patients — more reliable metric
     "seed":                 42,
     "num_workers":           0,
-    "samples_per_patient":  15,    # random slices sampled per patient per epoch
+    "samples_per_patient":  30,    # more diverse sampling per epoch
     "augment":            True,
     "resume":             False,   # fresh start
     # ── data ─────────────────────────────────────────────────────────────────
@@ -345,6 +345,17 @@ def build_augmentation_fn(enable: bool):
     if not enable:
         return None
 
+    from scipy.ndimage import map_coordinates, gaussian_filter as _gf
+
+    def _elastic(img_np, msk_np, alpha=40, sigma=5):
+        sh = img_np.shape
+        dx = _gf(np.random.randn(*sh), sigma) * alpha
+        dy = _gf(np.random.randn(*sh), sigma) * alpha
+        y, x = np.mgrid[0:sh[0], 0:sh[1]]
+        img_out = map_coordinates(img_np, [(y+dy).ravel(), (x+dx).ravel()], order=1).reshape(sh)
+        msk_out = map_coordinates(msk_np, [(y+dy).ravel(), (x+dx).ravel()], order=0).reshape(sh)
+        return img_out.astype(np.float32), msk_out.astype(np.float32)
+
     def augment(img: torch.Tensor, mask: torch.Tensor):
         # Horizontal / vertical flip
         img, mask = default_training_augmentations(img, mask)
@@ -354,6 +365,12 @@ def build_augmentation_fn(enable: bool):
         if k:
             img  = torch.rot90(img,  k, dims=[1, 2])
             mask = torch.rot90(mask, k, dims=[1, 2])
+
+        # Elastic deformation — biggest boost for medical segmentation
+        if random.random() < 0.5:
+            img_np, msk_np = _elastic(img.squeeze().numpy(), mask.squeeze().numpy())
+            img  = torch.from_numpy(img_np).unsqueeze(0)
+            mask = torch.from_numpy(msk_np).unsqueeze(0)
 
         # Gaussian noise (image only)
         if random.random() < 0.3:
@@ -616,6 +633,7 @@ model     = smp.Unet(
     in_channels=1,
     classes=1,
     activation=None,
+    decoder_dropout=0.3,
 ).to(device)
 criterion = BCEDiceLoss(bce_weight=CONFIG["bce_weight"], pos_weight=CONFIG["pos_weight"])
 optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG["lr"], weight_decay=1e-4)
