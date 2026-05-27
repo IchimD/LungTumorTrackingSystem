@@ -320,15 +320,22 @@ class VolumeSliceDataset(Dataset):
             img_vol = safe_np_load(img_path)
             msk_vol = normalize_mask(safe_np_load(msk_path))
 
-        img_s = np.array(img_vol[z] if img_vol.ndim == 3 else img_vol, dtype=np.float32)
+        D = img_vol.shape[0] if img_vol.ndim == 3 else 1
         msk_s = np.array(msk_vol[z] if msk_vol.ndim == 3 else msk_vol, dtype=np.float32)
-
-        sf    = (256 / img_s.shape[0], 256 / img_s.shape[1])
-        img_r = zoom(img_s, sf, order=1)
-        img_r = (img_r - img_r.min()) / (img_r.max() - img_r.min() + 1e-8)
+        sf = (256 / msk_s.shape[0], 256 / msk_s.shape[1])
         msk_r = (zoom(msk_s, sf, order=0) > 0.5).astype(np.float32)
 
-        img_t = torch.from_numpy(img_r).unsqueeze(0)
+        # 2.5D: stack [z-1, z, z+1] as 3 channels — uses full pretrained RGB weights
+        channels = []
+        for dz in (-1, 0, 1):
+            zi = max(0, min(D - 1, z + dz))
+            s = np.array(img_vol[zi] if img_vol.ndim == 3 else img_vol, dtype=np.float32)
+            s = zoom(s, sf, order=1)
+            s = (s - s.min()) / (s.max() - s.min() + 1e-8)
+            channels.append(s)
+        img_r = np.stack(channels, axis=0)  # (3, 256, 256)
+
+        img_t = torch.from_numpy(img_r)     # (3, H, W) — no unsqueeze
         msk_t = torch.from_numpy(msk_r).unsqueeze(0)
         if self.augment_fn is not None:
             img_t, msk_t = self.augment_fn(img_t, msk_t)
@@ -370,13 +377,19 @@ class AllSlicesDataset(Dataset):
         except Exception:
             img_vol = safe_np_load(img_path)
             msk_vol = normalize_mask(safe_np_load(msk_path))
-        img_s = np.array(img_vol[z], dtype=np.float32)
+        D = img_vol.shape[0]
         msk_s = np.array(msk_vol[z], dtype=np.float32)
-        sf = (256 / img_s.shape[0], 256 / img_s.shape[1])
-        img_r = zoom(img_s, sf, order=1)
-        img_r = (img_r - img_r.min()) / (img_r.max() - img_r.min() + 1e-8)
+        sf = (256 / msk_s.shape[0], 256 / msk_s.shape[1])
         msk_r = (zoom(msk_s, sf, order=0) > 0.5).astype(np.float32)
-        return torch.from_numpy(img_r).unsqueeze(0), torch.from_numpy(msk_r).unsqueeze(0), ""
+        channels = []
+        for dz in (-1, 0, 1):
+            zi = max(0, min(D - 1, z + dz))
+            s = np.array(img_vol[zi], dtype=np.float32)
+            s = zoom(s, sf, order=1)
+            s = (s - s.min()) / (s.max() - s.min() + 1e-8)
+            channels.append(s)
+        img_r = np.stack(channels, axis=0)
+        return torch.from_numpy(img_r), torch.from_numpy(msk_r).unsqueeze(0), ""
 
 
 # ============================================================================
@@ -389,13 +402,19 @@ def build_augmentation_fn(enable: bool):
     from scipy.ndimage import map_coordinates, gaussian_filter as _gf
 
     def _elastic(img_np, msk_np, alpha=40, sigma=5):
-        sh = img_np.shape
+        sh = img_np.shape[-2:]  # H, W — works for (3,H,W) or (H,W)
         dx = _gf(np.random.randn(*sh), sigma) * alpha
         dy = _gf(np.random.randn(*sh), sigma) * alpha
         y, x = np.mgrid[0:sh[0], 0:sh[1]]
-        img_out = map_coordinates(img_np, [(y+dy).ravel(), (x+dx).ravel()], order=1).reshape(sh)
-        msk_out = map_coordinates(msk_np, [(y+dy).ravel(), (x+dx).ravel()], order=0).reshape(sh)
-        return img_out.astype(np.float32), msk_out.astype(np.float32)
+        coords = [(y + dy).ravel(), (x + dx).ravel()]
+        if img_np.ndim == 3:
+            out_ch = [map_coordinates(img_np[c], coords, order=1).reshape(sh)
+                      for c in range(img_np.shape[0])]
+            img_out = np.stack(out_ch, axis=0).astype(np.float32)
+        else:
+            img_out = map_coordinates(img_np, coords, order=1).reshape(sh).astype(np.float32)
+        msk_out = map_coordinates(msk_np, coords, order=0).reshape(sh).astype(np.float32)
+        return img_out, msk_out
 
     def augment(img: torch.Tensor, mask: torch.Tensor):
         # Horizontal / vertical flip
@@ -409,8 +428,8 @@ def build_augmentation_fn(enable: bool):
 
         # Elastic deformation — biggest boost for medical segmentation
         if random.random() < 0.3:
-            img_np, msk_np = _elastic(img.squeeze().numpy(), mask.squeeze().numpy())
-            img  = torch.from_numpy(img_np).unsqueeze(0)
+            img_np, msk_np = _elastic(img.numpy(), mask.squeeze().numpy())
+            img  = torch.from_numpy(img_np)
             mask = torch.from_numpy(msk_np).unsqueeze(0)
 
         # Gaussian noise (image only)
@@ -667,9 +686,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
 
 model     = smp.Unet(
-    encoder_name="resnet34",
+    encoder_name="resnet50",
     encoder_weights="imagenet",
-    in_channels=1,
+    in_channels=3,
     classes=1,
     activation=None,
 ).to(device)
@@ -686,7 +705,7 @@ writer = SummaryWriter(log_dir=CONFIG["logs_dir"])
 scaler = torch.amp.GradScaler("cuda", enabled=torch.cuda.is_available())
 
 n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-print(f"✓ smp.Unet  encoder=resnet34(imagenet)  params={n_params:,}")
+print(f"✓ smp.Unet  encoder=resnet50(imagenet) 2.5D(3-slice)  params={n_params:,}")
 print(f"✓ Loss: BCEDiceLoss  bce_weight={CONFIG['bce_weight']}  pos_weight={CONFIG['pos_weight']}")
 print(f"✓ Optimiser: Adam  lr={CONFIG['lr']}  weight_decay=1e-4")
 print(f"✓ Scheduler: ReduceLROnPlateau  patience={CONFIG['lr_patience']}  factor={CONFIG['lr_factor']}")
