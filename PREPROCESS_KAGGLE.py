@@ -19,14 +19,17 @@ Run this once before COLAB_TRAINING_CELL.py.
 import os, sys, glob, warnings
 import numpy as np
 import nibabel as nib
+from scipy.ndimage import zoom as nd_zoom
 from tqdm import tqdm
 
+# Save to /kaggle/temp/ — up to ~100 GB temp space, sufficient for ~485 patients
 OUT_IMG  = "/kaggle/working/images"
 OUT_MASK = "/kaggle/working/masks"
 os.makedirs(OUT_IMG,  exist_ok=True)
 os.makedirs(OUT_MASK, exist_ok=True)
 
 HU_MIN, HU_MAX = -200, 300   # same window as Decathlon preprocessing
+TARGET_HW = 256              # resize each slice to 256×256 — saves ~8× disk vs 512×512
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -38,10 +41,24 @@ def load_nifti_as_DHW(path: str) -> np.ndarray:
     data = np.moveaxis(data, -1, 0)          # → (Z, X, Y) = (D, H, W)
     return data
 
+def resize_volume(vol: np.ndarray, target_hw: int, order: int) -> np.ndarray:
+    """Resize H and W to target_hw×target_hw; keep D unchanged."""
+    D, H, W = vol.shape
+    if H == target_hw and W == target_hw:
+        return vol
+    sf_h = target_hw / H
+    sf_w = target_hw / W
+    return nd_zoom(vol, (1.0, sf_h, sf_w), order=order)
+
 def save_pair(ct: np.ndarray, mask: np.ndarray, stem: str) -> bool:
-    """HU-clip ct, binarise mask, skip if no tumor, save .npy."""
+    """HU-clip, resize to 256×256 slices, binarise mask, skip if no tumor, save .npy."""
     ct   = np.clip(ct, HU_MIN, HU_MAX).astype(np.float32)
-    mask = (mask > 0).astype(np.uint8)
+    mask = (mask > 0).astype(np.float32)
+
+    # Resize both volumes to TARGET_HW × TARGET_HW per slice
+    ct   = resize_volume(ct,   TARGET_HW, order=1).astype(np.float32)
+    mask = resize_volume(mask, TARGET_HW, order=0).astype(np.uint8)   # nearest for binary
+
     if mask.sum() == 0:
         return False
     np.save(os.path.join(OUT_IMG,  stem + ".npy"), ct)
@@ -152,8 +169,8 @@ for pid in tqdm(patient_ids, desc="NSCLC-HF"):
         skip += 1
         # Some patients legitimately missing GTV — not an error
     finally:
-        # Delete cached NIfTI immediately to conserve disk space
-        for f in glob.glob(os.path.join(HF_CACHE, "**", f"{pid}*"), recursive=True):
+        # Delete cached NIfTI files immediately to conserve disk space
+        for f in glob.glob(os.path.join(HF_CACHE, "**", "*.nii.gz"), recursive=True):
             try: os.remove(f)
             except: pass
 
