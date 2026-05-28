@@ -29,13 +29,16 @@ Drive layout expected:
 import os, sys
 
 # ── Detect environment ────────────────────────────────────────────────────────
-try:
-    from google.colab import drive as _colab_drive
-    IS_COLAB = True
-except ImportError:
-    IS_COLAB = False
+# Check Kaggle first — Kaggle has google.colab installed but it doesn't work
+IS_KAGGLE = os.path.exists("/kaggle/working")
+IS_COLAB = False
+if not IS_KAGGLE:
+    try:
+        from google.colab import drive as _colab_drive
+        IS_COLAB = True
+    except ImportError:
+        IS_COLAB = False
 
-IS_KAGGLE = os.path.exists("/kaggle/working") and not IS_COLAB
 ENV = "Colab" if IS_COLAB else ("Kaggle" if IS_KAGGLE else "Vast.ai / other")
 print(f"Environment: {ENV}")
 
