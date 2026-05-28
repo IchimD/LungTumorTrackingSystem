@@ -685,14 +685,23 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
 
 model     = smp.UnetPlusPlus(
-    encoder_name="resnet50",
+    encoder_name="resnet34",
     encoder_weights="imagenet",
     in_channels=3,
     classes=1,
     activation=None,
 ).to(device)
+
+# Freeze encoder — pretrained features are perfect; only decoder needs training
+# This cuts trainable params from ~24M to ~5M, eliminating overfitting on 50 patients
+for param in model.encoder.parameters():
+    param.requires_grad = False
+
 criterion = BCEDiceLoss(bce_weight=CONFIG["bce_weight"], pos_weight=CONFIG["pos_weight"])
-optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG["lr"], weight_decay=1e-4)
+optimizer = torch.optim.Adam(
+    filter(lambda p: p.requires_grad, model.parameters()),
+    lr=CONFIG["lr"], weight_decay=1e-3
+)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
     optimizer,
     T_0=CONFIG["cosine_T0"],
@@ -703,7 +712,8 @@ writer = SummaryWriter(log_dir=CONFIG["logs_dir"])
 scaler = torch.amp.GradScaler("cuda", enabled=torch.cuda.is_available())
 
 n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-print(f"✓ smp.UnetPlusPlus  encoder=resnet50(imagenet) 2.5D(3-slice)  params={n_params:,}")
+n_total  = sum(p.numel() for p in model.parameters())
+print(f"✓ smp.UnetPlusPlus  encoder=resnet34(frozen) 2.5D(3-slice)  trainable={n_params:,}/{n_total:,}")
 print(f"✓ Loss: BCEDiceLoss  bce_weight={CONFIG['bce_weight']}  pos_weight={CONFIG['pos_weight']}")
 print(f"✓ Optimiser: Adam  lr={CONFIG['lr']}  weight_decay=1e-4")
 print(f"✓ Scheduler: CosineAnnealingWarmRestarts  T0={CONFIG['cosine_T0']}  eta_min={CONFIG['lr_min']}")
