@@ -156,16 +156,16 @@ CONFIG = {
     "results_dir": "/content/drive/My Drive/LICENTA_COLAB/results" if IS_COLAB else "/workspace/results",
     # ── training ─────────────────────────────────────────────────────────────
     "batch_size":          32,
-    "epochs":             200,
+    "epochs":              80,     # per fold
     "lr":               3e-4,
     "lr_min":           1e-6,
-    "cosine_T0":           50,     # CosineAnnealingWarmRestarts period
-    "early_stop_patience": 60,
+    "cosine_T0":           40,
+    "early_stop_patience": 30,
     "grad_clip":          1.0,
-    "val_fraction":       0.20,
+    "n_folds":              5,
     "seed":                 42,
     "num_workers":           0,
-    "samples_per_patient":  40,
+    "samples_per_patient":  30,
     "augment":            True,
     "resume":             False,   # fresh start
     # ── data ─────────────────────────────────────────────────────────────────
@@ -606,242 +606,154 @@ def log_sample_images(writer, model, dataset, device, epoch, max_images=4):
 
 
 # ============================================================================
-# STEP 5 — Build datasets
+# STEP 5 — 5-Fold Cross-Validation
 # ============================================================================
 print("\n" + "=" * 70)
-print("STEP 5: Building datasets …")
+print("STEP 5: 5-Fold Cross-Validation Setup")
 print("=" * 70)
 
 set_seed(CONFIG["seed"])
 os.makedirs(CONFIG["logs_dir"],    exist_ok=True)
 os.makedirs(CONFIG["results_dir"], exist_ok=True)
 
-patient_ids = collect_patient_ids(CONFIG["image_dir"], CONFIG["mask_dir"])
-print(f"✓ Found {len(patient_ids)} patients with image/mask pairs")
-
-if not patient_ids:
-    for path in [CONFIG["image_dir"], CONFIG["mask_dir"]]:
-        try:
-            entries = os.listdir(path)
-            print(f"\n{path} ({len(entries)} entries): {entries[:10]}")
-        except Exception as ex:
-            print(f"\nCannot list {path}: {ex}")
-    raise RuntimeError(
-        "No patients found! Check that Drive is mounted and paths are correct.\n"
-        f"image_dir = {CONFIG['image_dir']}\nmask_dir  = {CONFIG['mask_dir']}"
-    )
-
-train_ids, val_ids = split_patient_ids(patient_ids, CONFIG["val_fraction"], CONFIG["seed"])
-print(f"  Train: {len(train_ids)} patients,  Val: {len(val_ids)} patients")
-
-aug_fn = build_augmentation_fn(CONFIG["augment"])
-
-train_ds = VolumeSliceDataset(
-    CONFIG["image_dir"], CONFIG["mask_dir"],
-    patient_ids=train_ids, augment_fn=aug_fn,
-    background_ratio=CONFIG["background_ratio"],
-    samples_per_patient=CONFIG["samples_per_patient"],
-    max_vol_pos_frac=CONFIG["max_vol_pos_frac"],
-)
-val_ds = AllSlicesDataset(
-    CONFIG["image_dir"], CONFIG["mask_dir"],
-    patient_ids=val_ids,
-    max_vol_pos_frac=CONFIG["max_vol_pos_frac"],
-)
-print(f"  Train dataset: {len(train_ds)} items")
-print(f"  Val   dataset: {len(val_ds)} items")
-
-train_loader = DataLoader(
-    train_ds, batch_size=CONFIG["batch_size"], shuffle=True,
-    num_workers=CONFIG["num_workers"], pin_memory=torch.cuda.is_available(),
-)
-val_loader = DataLoader(
-    val_ds, batch_size=CONFIG["batch_size"], shuffle=False,
-    num_workers=CONFIG["num_workers"], pin_memory=torch.cuda.is_available(),
-)
-
-# Quick sanity check
-print("\nSanity check — sampling first batch …")
-imgs, masks, pids = next(iter(train_loader))
-print(f"  Images: {imgs.shape}  Masks: {masks.shape}")
-print(f"  Mask pixel sum (should be > 0): {masks.sum().item():.0f}")
-if masks.sum() == 0:
-    raise RuntimeError("CRITICAL: first batch has all-zero masks — data loading failed.")
-print("✓ Data looks good!")
-
-# ============================================================================
-# STEP 6 — Model, loss, optimiser, scheduler
-# ============================================================================
-print("\n" + "=" * 70)
-print("STEP 6: Initialising model …")
-print("=" * 70)
-
-if torch.cuda.is_available():
-    torch.cuda.empty_cache()
-    free, total = torch.cuda.mem_get_info()
-    print(f"GPU memory free: {free/1e9:.1f} GB / {total/1e9:.1f} GB")
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Device: {device}")
+if torch.cuda.is_available():
+    free, total = torch.cuda.mem_get_info()
+    print(f"GPU: {torch.cuda.get_device_properties(0).name}  free={free/1e9:.1f}GB")
 
-model     = smp.UnetPlusPlus(
-    encoder_name="resnet34",
-    encoder_weights="imagenet",
-    in_channels=3,
-    classes=1,
-    activation=None,
-).to(device)
+all_patient_ids = collect_patient_ids(CONFIG["image_dir"], CONFIG["mask_dir"])
+print(f"✓ Found {len(all_patient_ids)} patients total")
+if not all_patient_ids:
+    raise RuntimeError(f"No patients found in {CONFIG['image_dir']} / {CONFIG['mask_dir']}")
 
-# Freeze encoder — pretrained features are perfect; only decoder needs training
-# This cuts trainable params from ~24M to ~5M, eliminating overfitting on 50 patients
-for param in model.encoder.parameters():
-    param.requires_grad = False
+# Build folds
+n_folds = CONFIG["n_folds"]
+shuffled = all_patient_ids.copy()
+random.Random(CONFIG["seed"]).shuffle(shuffled)
+fold_size = len(shuffled) // n_folds
+folds = [shuffled[i*fold_size : (i+1)*fold_size if i < n_folds-1 else len(shuffled)]
+         for i in range(n_folds)]
+print(f"  {n_folds} folds: {[len(f) for f in folds]} patients each")
 
+writer  = SummaryWriter(log_dir=CONFIG["logs_dir"])
+aug_fn  = build_augmentation_fn(CONFIG["augment"])
 criterion = BCEDiceLoss(bce_weight=CONFIG["bce_weight"], pos_weight=CONFIG["pos_weight"])
-optimizer = torch.optim.Adam(
-    filter(lambda p: p.requires_grad, model.parameters()),
-    lr=CONFIG["lr"], weight_decay=1e-3
-)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    optimizer,
-    T_0=CONFIG["cosine_T0"],
-    T_mult=1,
-    eta_min=CONFIG["lr_min"],
-)
-writer = SummaryWriter(log_dir=CONFIG["logs_dir"])
-scaler = torch.amp.GradScaler("cuda", enabled=torch.cuda.is_available())
 
-n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-n_total  = sum(p.numel() for p in model.parameters())
-print(f"✓ smp.UnetPlusPlus  encoder=resnet34(frozen) 2.5D(3-slice)  trainable={n_params:,}/{n_total:,}")
-print(f"✓ Loss: BCEDiceLoss  bce_weight={CONFIG['bce_weight']}  pos_weight={CONFIG['pos_weight']}")
-print(f"✓ Optimiser: Adam  lr={CONFIG['lr']}  weight_decay=1e-4")
-print(f"✓ Scheduler: CosineAnnealingWarmRestarts  T0={CONFIG['cosine_T0']}  eta_min={CONFIG['lr_min']}")
-print(f"✓ AMP: enabled={torch.cuda.is_available()}")
-
-# Log hyperparameters
-writer.add_hparams(
-    {k: str(v) for k, v in CONFIG.items()},
-    {"hparam/best_dice": 0.0},
-)
+fold_best_dices = []
 
 # ============================================================================
-# STEP 7 — (Optional) resume from checkpoint
+# STEP 6-8 — Train each fold
 # ============================================================================
-best_val_dice   = 0.0
-no_improve      = 0
-start_epoch     = 1
-checkpoint_path = os.path.join(CONFIG["results_dir"], "best_model.pt")
+for fold_idx in range(n_folds):
+    print(f"\n{'='*70}")
+    print(f"FOLD {fold_idx+1}/{n_folds}")
+    print(f"{'='*70}")
 
-if CONFIG["resume"] and os.path.exists(checkpoint_path):
-    ckpt = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
-    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-    best_val_dice = ckpt.get("val_dice", 0.0)
-    start_epoch   = ckpt.get("epoch", 1) + 1
-    print(f"\n✓ Resumed from epoch {start_epoch - 1}, best_dice={best_val_dice:.4f}")
+    val_ids   = folds[fold_idx]
+    train_ids = [p for i, f in enumerate(folds) for p in f if i != fold_idx]
+    print(f"  Train: {len(train_ids)} patients   Val: {len(val_ids)} patients")
 
-# Save patient split
-with open(os.path.join(CONFIG["results_dir"], "patient_split.json"), "w") as f:
-    json.dump({"train": train_ids, "val": val_ids}, f, indent=2)
-
-# ============================================================================
-# STEP 8 — Training loop
-# ============================================================================
-print("\n" + "=" * 70)
-print("STEP 8: Training …")
-print("=" * 70)
-
-for epoch in range(start_epoch, CONFIG["epochs"] + 1):
-
-    train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, CONFIG["grad_clip"], scaler)
-    stats      = evaluate(model, val_loader, criterion, device, scaler)
-
-    scheduler.step(epoch)
-    current_lr = optimizer.param_groups[0]["lr"]
-
-    # Console log
-    print(
-        f"Ep {epoch:3d}/{CONFIG['epochs']}  "
-        f"train_loss={train_loss:.4f}  "
-        f"val_loss={stats['loss']:.4f}  "
-        f"dice={stats['dice']:.4f}  "
-        f"iou={stats['iou']:.4f}  "
-        f"sens={stats['sens']:.4f}  "
-        f"prec={stats['prec']:.4f}  "
-        f"lr={current_lr:.2e}"
+    train_ds = VolumeSliceDataset(
+        CONFIG["image_dir"], CONFIG["mask_dir"],
+        patient_ids=train_ids, augment_fn=aug_fn,
+        background_ratio=CONFIG["background_ratio"],
+        samples_per_patient=CONFIG["samples_per_patient"],
+        max_vol_pos_frac=CONFIG["max_vol_pos_frac"],
     )
+    val_ds = AllSlicesDataset(
+        CONFIG["image_dir"], CONFIG["mask_dir"],
+        patient_ids=val_ids,
+        max_vol_pos_frac=CONFIG["max_vol_pos_frac"],
+    )
+    train_loader = DataLoader(train_ds, batch_size=CONFIG["batch_size"], shuffle=True,
+                              num_workers=0, pin_memory=True)
+    val_loader   = DataLoader(val_ds,   batch_size=CONFIG["batch_size"], shuffle=False,
+                              num_workers=0, pin_memory=True)
 
-    # TensorBoard
-    writer.add_scalar("train/loss",      train_loss,      epoch)
-    writer.add_scalar("val/loss",        stats["loss"],   epoch)
-    writer.add_scalar("val/dice",        stats["dice"],   epoch)
-    writer.add_scalar("val/iou",         stats["iou"],    epoch)
-    writer.add_scalar("val/sensitivity", stats["sens"],   epoch)
-    writer.add_scalar("val/precision",   stats["prec"],   epoch)
-    writer.add_scalar("train/lr",        current_lr,      epoch)
+    # Fresh model + frozen encoder for each fold
+    model = smp.UnetPlusPlus(
+        encoder_name="resnet34", encoder_weights="imagenet",
+        in_channels=3, classes=1, activation=None,
+    ).to(device)
+    for param in model.encoder.parameters():
+        param.requires_grad = False
 
-    # Sample predictions every 10 epochs
-    if epoch % 10 == 0:
-        try:
-            log_sample_images(writer, model, val_ds, device, epoch)
-        except Exception as e:
-            print(f"  ⚠ Could not log sample images: {e}")
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=CONFIG["lr"], weight_decay=1e-3,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=CONFIG["cosine_T0"], T_mult=1, eta_min=CONFIG["lr_min"],
+    )
+    scaler = torch.amp.GradScaler("cuda", enabled=True)
 
-    # Live plot every 5 epochs
-    history["train_loss"].append(train_loss)
-    history["val_loss"].append(stats["loss"])
-    history["val_dice"].append(stats["dice"])
-    history["val_iou"].append(stats["iou"])
-    history["lr"].append(current_lr)
+    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"  Trainable params: {n_train:,} (encoder frozen)")
 
-    if epoch % 5 == 0 or epoch == CONFIG["epochs"]:
-        try:
-            update_live_plot(epoch)
-        except Exception as e:
-            print(f"  ⚠ Could not draw live plot: {e}")
+    fold_ckpt     = os.path.join(CONFIG["results_dir"], f"fold{fold_idx+1}_best.pt")
+    best_dice_f   = 0.0
+    no_improve_f  = 0
 
-    # Save best checkpoint
-    if stats["dice"] > best_val_dice:
-        best_val_dice = stats["dice"]
-        no_improve    = 0
-        torch.save(
-            {
-                "epoch":                epoch,
-                "model_state_dict":     model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "val_dice":             best_val_dice,
-                "config":               CONFIG,
-                "history":              history,
-            },
-            checkpoint_path,
-        )
-        print(f"  ✓ New best — checkpoint saved (dice={best_val_dice:.4f})")
-        if not IS_COLAB:
-            os.system(f"rclone copy {checkpoint_path} 'gdrive:Licenta/DATASET/results/' --no-traverse > /dev/null 2>&1 &")
-    else:
-        no_improve += 1
-        if no_improve >= CONFIG["early_stop_patience"]:
-            print(f"\n⏹ Early stopping at epoch {epoch} (no improvement for {no_improve} epochs)")
-            break
+    for epoch in range(1, CONFIG["epochs"] + 1):
+        train_loss = train_one_epoch(model, train_loader, criterion, optimizer,
+                                     device, CONFIG["grad_clip"], scaler)
+        stats      = evaluate(model, val_loader, criterion, device, scaler)
+        scheduler.step(epoch)
+        lr = optimizer.param_groups[0]["lr"]
 
-    # Periodic checkpoint every 10 epochs — survives even if Dice never improves
-    if epoch % 10 == 0:
-        periodic_path = os.path.join(CONFIG["results_dir"], f"checkpoint_ep{epoch:03d}.pt")
-        torch.save(
-            {
-                "epoch":                epoch,
-                "model_state_dict":     model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "val_dice":             stats["dice"],
-                "config":               CONFIG,
-                "history":              history,
-            },
-            periodic_path,
-        )
-        print(f"  💾 Periodic checkpoint saved → {periodic_path}")
+        print(f"  F{fold_idx+1} Ep{epoch:3d}/{CONFIG['epochs']}  "
+              f"loss={train_loss:.4f}  dice={stats['dice']:.4f}  "
+              f"sens={stats['sens']:.4f}  prec={stats['prec']:.4f}  lr={lr:.2e}")
+
+        writer.add_scalar(f"fold{fold_idx+1}/train_loss", train_loss, epoch)
+        writer.add_scalar(f"fold{fold_idx+1}/val_dice",   stats["dice"], epoch)
+
+        if stats["dice"] > best_dice_f:
+            best_dice_f  = stats["dice"]
+            no_improve_f = 0
+            torch.save(model.state_dict(), fold_ckpt)
+            print(f"    ✓ New best dice={best_dice_f:.4f} — saved")
+            if not IS_COLAB:
+                os.system(f"rclone copy {fold_ckpt} 'gdrive:Licenta/DATASET/results/' "
+                          f"--no-traverse > /dev/null 2>&1 &")
+        else:
+            no_improve_f += 1
+            if no_improve_f >= CONFIG["early_stop_patience"]:
+                print(f"    ⏹ Early stop at epoch {epoch}")
+                break
+
+    fold_best_dices.append(best_dice_f)
+    print(f"\n  → Fold {fold_idx+1} best dice: {best_dice_f:.4f}")
 
 writer.close()
+
+# ============================================================================
+# CROSS-VALIDATION RESULTS
+# ============================================================================
+mean_dice = float(np.mean(fold_best_dices))
+std_dice  = float(np.std(fold_best_dices))
+best_val_dice = mean_dice  # for summary section below
+
+# Identify best fold for TTA
+best_fold_idx  = int(np.argmax(fold_best_dices))
+best_fold_ckpt = os.path.join(CONFIG["results_dir"], f"fold{best_fold_idx+1}_best.pt")
+print(f"\n  Best fold: {best_fold_idx+1}  (dice={fold_best_dices[best_fold_idx]:.4f})")
+print(f"  Mean ± Std: {mean_dice:.4f} ± {std_dice:.4f}")
+
+# Rebuild val_loader for the best fold (needed for TTA)
+best_val_ids = folds[best_fold_idx]
+best_val_ds  = AllSlicesDataset(
+    CONFIG["image_dir"], CONFIG["mask_dir"],
+    patient_ids=best_val_ids,
+    max_vol_pos_frac=CONFIG["max_vol_pos_frac"],
+)
+val_loader = DataLoader(best_val_ds, batch_size=CONFIG["batch_size"], shuffle=False,
+                        num_workers=0, pin_memory=True)
+# Reload model with best fold weights for TTA
+model = smp.UnetPlusPlus(
+    encoder_name="resnet34", encoder_weights=None,
+    in_channels=3, classes=1, activation=None,
+).to(device)
 
 # Copy TensorBoard logs to permanent storage
 if IS_COLAB:
@@ -864,8 +776,8 @@ print("TTA EVALUATION (best checkpoint + 4-flip ensemble)")
 print("=" * 70)
 
 try:
-    ckpt = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    ckpt = torch.load(best_fold_ckpt, map_location=device)
+    model.load_state_dict(ckpt)  # saved as raw state_dict
     model.eval()
     tta_dice_total, tta_count = 0.0, 0
     with torch.no_grad():
@@ -902,7 +814,7 @@ print("\n" + "=" * 70)
 print("TRAINING COMPLETE")
 print("=" * 70)
 print(f"  Best validation Dice : {best_val_dice:.4f}")
-print(f"  Checkpoint saved to  : {checkpoint_path}")
+print(f"  Best fold checkpoint : {best_fold_ckpt}")
 print(f"  TensorBoard logs     : {CONFIG['logs_dir']}")
 print(f"  Live plot saved to   : {CONFIG['results_dir']}/training_progress.png")
 
