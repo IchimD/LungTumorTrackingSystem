@@ -35,7 +35,8 @@ try:
 except ImportError:
     IS_COLAB = False
 
-ENV = "Colab" if IS_COLAB else "Vast.ai / other"
+IS_KAGGLE = os.path.exists("/kaggle/working") and not IS_COLAB
+ENV = "Colab" if IS_COLAB else ("Kaggle" if IS_KAGGLE else "Vast.ai / other")
 print(f"Environment: {ENV}")
 
 # ============================================================================
@@ -150,10 +151,16 @@ from src.data.io import (
 # ============================================================================
 CONFIG = {
     # ── paths (auto-detected per environment) ────────────────────────────────
-    "image_dir":   "/content/drive/My Drive/LICENTA_COLAB " if IS_COLAB else "/workspace/images",
-    "mask_dir":    "/content/drive/My Drive/LICENTA_COLAB /masks" if IS_COLAB else "/workspace/masks",
+    "image_dir":   ("/content/drive/My Drive/LICENTA_COLAB" if IS_COLAB
+                    else "/kaggle/working/images" if IS_KAGGLE
+                    else "/workspace/images"),
+    "mask_dir":    ("/content/drive/My Drive/LICENTA_COLAB/masks" if IS_COLAB
+                    else "/kaggle/working/masks" if IS_KAGGLE
+                    else "/workspace/masks"),
     "logs_dir":    "/tmp/tb_logs",
-    "results_dir": "/content/drive/My Drive/LICENTA_COLAB/results" if IS_COLAB else "/workspace/results",
+    "results_dir": ("/content/drive/My Drive/LICENTA_COLAB/results" if IS_COLAB
+                    else "/kaggle/working/results" if IS_KAGGLE
+                    else "/workspace/results"),
     # ── training ─────────────────────────────────────────────────────────────
     "batch_size":          32,
     "epochs":              80,     # per fold
