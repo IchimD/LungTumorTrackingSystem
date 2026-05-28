@@ -169,10 +169,12 @@ for pid in tqdm(patient_ids, desc="NSCLC-HF"):
         skip += 1
         # Some patients legitimately missing GTV — not an error
     finally:
-        # Delete cached NIfTI files immediately to conserve disk space
-        for f in glob.glob(os.path.join(HF_CACHE, "**", "*.nii.gz"), recursive=True):
-            try: os.remove(f)
-            except: pass
+        # Nuke entire cache dir after each patient — HF stores blobs with hash
+        # names so glob("*.nii.gz") only removes symlinks, not the actual data
+        import shutil
+        if os.path.exists(HF_CACHE):
+            shutil.rmtree(HF_CACHE)
+        os.makedirs(HF_CACHE, exist_ok=True)
 
 print(f"\n  ✓ NSCLC: {ok} saved, {skip} skipped")
 
