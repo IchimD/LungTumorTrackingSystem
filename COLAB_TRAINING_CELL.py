@@ -166,16 +166,17 @@ CONFIG = {
                     else "/workspace/results"),
     # ── training ─────────────────────────────────────────────────────────────
     "batch_size":          32,
-    "epochs":              80,     # per fold
-    "lr":               3e-4,
+    "epochs":              60,     # per fold
+    "lr":               3e-4,      # decoder LR
+    "lr_encoder":       3e-5,      # encoder LR — 10x smaller to prevent forgetting ImageNet
     "lr_min":           1e-6,
-    "cosine_T0":           40,
-    "early_stop_patience": 30,
+    "cosine_T0":           20,
+    "early_stop_patience": 15,
     "grad_clip":          1.0,
-    "n_folds":              5,
+    "n_folds":              3,     # 3 folds → 36 val patients each, fits in 9h Kaggle session
     "seed":                 42,
     "num_workers":           0,
-    "samples_per_patient":  30,
+    "samples_per_patient":  40,
     "augment":            True,
     "resume":             False,   # fresh start
     # ── data ─────────────────────────────────────────────────────────────────
@@ -680,25 +681,29 @@ for fold_idx in range(n_folds):
     val_loader   = DataLoader(val_ds,   batch_size=CONFIG["batch_size"], shuffle=False,
                               num_workers=0, pin_memory=True)
 
-    # Fresh model + frozen encoder for each fold
+    # Fresh model — encoder unfrozen with small LR to adapt ImageNet→CT features
     model = smp.UnetPlusPlus(
         encoder_name="resnet34", encoder_weights="imagenet",
         in_channels=3, classes=1, activation=None,
     ).to(device)
-    for param in model.encoder.parameters():
-        param.requires_grad = False
 
-    optimizer = torch.optim.Adam(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=CONFIG["lr"], weight_decay=1e-3,
-    )
+    # Differential learning rates: encoder learns slowly (preserve ImageNet features),
+    # decoder learns fast (new task-specific upsampling)
+    encoder_params = list(model.encoder.parameters())
+    decoder_params = (list(model.decoder.parameters()) +
+                      list(model.segmentation_head.parameters()))
+    optimizer = torch.optim.Adam([
+        {"params": encoder_params, "lr": CONFIG["lr_encoder"]},
+        {"params": decoder_params, "lr": CONFIG["lr"]},
+    ], weight_decay=1e-3)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer, T_0=CONFIG["cosine_T0"], T_mult=1, eta_min=CONFIG["lr_min"],
     )
     scaler = torch.amp.GradScaler("cuda", enabled=True)
 
-    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"  Trainable params: {n_train:,} (encoder frozen)")
+    n_enc   = sum(p.numel() for p in encoder_params)
+    n_dec   = sum(p.numel() for p in decoder_params)
+    print(f"  Encoder params: {n_enc:,} @ lr={CONFIG['lr_encoder']:.0e}  |  Decoder: {n_dec:,} @ lr={CONFIG['lr']:.0e}")
 
     fold_ckpt     = os.path.join(CONFIG["results_dir"], f"fold{fold_idx+1}_best.pt")
     best_dice_f   = 0.0
