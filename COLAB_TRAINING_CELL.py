@@ -170,8 +170,8 @@ CONFIG = {
     "lr":               3e-4,      # decoder LR
     "lr_encoder":       3e-5,      # encoder LR — 10x smaller to prevent forgetting ImageNet
     "lr_min":           1e-6,
-    "cosine_T0":           20,
-    "early_stop_patience": 15,
+    "cosine_T0":           60,     # single smooth decay — no restarts that disrupt convergence
+    "early_stop_patience": 25,
     "grad_clip":          1.0,
     "n_folds":              3,     # 3 folds → 36 val patients each, fits in 9h Kaggle session
     "seed":                 42,
