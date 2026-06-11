@@ -23,8 +23,12 @@ from scipy.ndimage import zoom as nd_zoom
 from tqdm import tqdm
 
 # Save to /kaggle/temp/ — up to ~100 GB temp space, sufficient for ~485 patients
-OUT_IMG  = "/kaggle/working/images"
-OUT_MASK = "/kaggle/working/masks"
+if os.path.exists("/kaggle/working"):
+    OUT_IMG  = "/kaggle/working/images"
+    OUT_MASK = "/kaggle/working/masks"
+else:
+    OUT_IMG  = "/content/images"   # Colab local disk
+    OUT_MASK = "/content/masks"
 os.makedirs(OUT_IMG,  exist_ok=True)
 os.makedirs(OUT_MASK, exist_ok=True)
 
@@ -132,7 +136,7 @@ from huggingface_hub import hf_hub_download, list_repo_tree
 
 REPO_ID   = "farrell236/NSCLC-Radiomics-NIFTI"
 REPO_TYPE = "dataset"
-HF_CACHE  = "/kaggle/working/hf_cache"
+HF_CACHE  = "/kaggle/working/hf_cache" if os.path.exists("/kaggle/working") else "/content/hf_cache"
 os.makedirs(HF_CACHE, exist_ok=True)
 
 # Patient IDs in this dataset: LUNG1-001 … LUNG1-422

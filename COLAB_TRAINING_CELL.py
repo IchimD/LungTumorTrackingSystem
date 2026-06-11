@@ -154,10 +154,10 @@ from src.data.io import (
 # ============================================================================
 CONFIG = {
     # ── paths (auto-detected per environment) ────────────────────────────────
-    "image_dir":   ("/content/drive/My Drive/LICENTA_COLAB" if IS_COLAB
+    "image_dir":   ("/content/images" if IS_COLAB
                     else "/kaggle/working/images" if IS_KAGGLE
                     else "/workspace/images"),
-    "mask_dir":    ("/content/drive/My Drive/LICENTA_COLAB/masks" if IS_COLAB
+    "mask_dir":    ("/content/masks" if IS_COLAB
                     else "/kaggle/working/masks" if IS_KAGGLE
                     else "/workspace/masks"),
     "logs_dir":    "/tmp/tb_logs",
