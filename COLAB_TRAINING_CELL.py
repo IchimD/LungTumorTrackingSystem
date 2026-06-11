@@ -165,18 +165,19 @@ CONFIG = {
                     else "/kaggle/working/results" if IS_KAGGLE
                     else "/workspace/results"),
     # ── training ─────────────────────────────────────────────────────────────
-    "batch_size":          32,
-    "epochs":              60,     # per fold
+    "img_size":           384,     # 384×384 input — more detail than 256×256
+    "batch_size":          16,     # reduced from 32 to fit 384×384 + EfficientNet-B4 in VRAM
+    "epochs":             100,     # per fold
     "lr":               3e-4,      # decoder LR
     "lr_encoder":       3e-5,      # encoder LR — 10x smaller to prevent forgetting ImageNet
     "lr_min":           1e-6,
-    "cosine_T0":           60,     # single smooth decay — no restarts that disrupt convergence
+    "cosine_T0":          100,     # single smooth decay over full 100 epochs
     "early_stop_patience": 25,
     "grad_clip":          1.0,
-    "n_folds":              3,     # 3 folds → 36 val patients each, fits in 9h Kaggle session
+    "n_folds":              3,
     "seed":                 42,
     "num_workers":           0,
-    "samples_per_patient":  40,
+    "samples_per_patient":  60,    # more samples per patient per epoch
     "augment":            True,
     "resume":             False,   # fresh start
     # ── data ─────────────────────────────────────────────────────────────────
@@ -234,11 +235,13 @@ class VolumeSliceDataset(Dataset):
         background_ratio: float = 0.05,
         samples_per_patient: int = 10,
         max_vol_pos_frac: float = 0.005,
+        img_size: int = 384,
     ) -> None:
         self.augment_fn          = augment_fn
         self.background_ratio    = background_ratio
         self.samples_per_patient = samples_per_patient
         self.max_vol_pos_frac    = max_vol_pos_frac
+        self.img_size            = img_size
         # (img_path, msk_path, pid, pos_z_list, neg_z_list)
         self._patients: List[Tuple[str, str, str, List[int], List[int]]] = []
         self._build_index(image_dir, mask_dir, patient_ids)
@@ -332,7 +335,7 @@ class VolumeSliceDataset(Dataset):
 
         D = img_vol.shape[0] if img_vol.ndim == 3 else 1
         msk_s = np.array(msk_vol[z] if msk_vol.ndim == 3 else msk_vol, dtype=np.float32)
-        sf = (256 / msk_s.shape[0], 256 / msk_s.shape[1])
+        sf = (self.img_size / msk_s.shape[0], self.img_size / msk_s.shape[1])
         msk_r = (zoom(msk_s, sf, order=0) > 0.5).astype(np.float32)
 
         # 2.5D: stack [z-1, z, z+1] as 3 channels — uses full pretrained RGB weights
@@ -343,7 +346,7 @@ class VolumeSliceDataset(Dataset):
             s = zoom(s, sf, order=1)
             s = (s - s.min()) / (s.max() - s.min() + 1e-8)
             channels.append(s)
-        img_r = np.stack(channels, axis=0)  # (3, 256, 256)
+        img_r = np.stack(channels, axis=0)  # (3, H, W)
 
         img_t = torch.from_numpy(img_r)     # (3, H, W) — no unsqueeze
         msk_t = torch.from_numpy(msk_r).unsqueeze(0)
@@ -359,8 +362,9 @@ class AllSlicesDataset(Dataset):
     """Deterministic validation dataset — enumerates ALL positive slices once at init.
     No random sampling → stable, reproducible val dice every epoch."""
 
-    def __init__(self, image_dir, mask_dir, patient_ids=None, max_vol_pos_frac=0.05):
+    def __init__(self, image_dir, mask_dir, patient_ids=None, max_vol_pos_frac=0.05, img_size=384):
         self._items = []
+        self.img_size = img_size
         candidates = VolumeSliceDataset._find_candidates(image_dir, mask_dir, patient_ids)
         for img_path, msk_path, pid in candidates:
             try:
@@ -389,7 +393,7 @@ class AllSlicesDataset(Dataset):
             msk_vol = normalize_mask(safe_np_load(msk_path))
         D = img_vol.shape[0]
         msk_s = np.array(msk_vol[z], dtype=np.float32)
-        sf = (256 / msk_s.shape[0], 256 / msk_s.shape[1])
+        sf = (self.img_size / msk_s.shape[0], self.img_size / msk_s.shape[1])
         msk_r = (zoom(msk_s, sf, order=0) > 0.5).astype(np.float32)
         channels = []
         for dz in (-1, 0, 1):
@@ -437,7 +441,7 @@ def build_augmentation_fn(enable: bool):
             mask = torch.rot90(mask, k, dims=[1, 2])
 
         # Elastic deformation — biggest boost for medical segmentation
-        if random.random() < 0.3:
+        if random.random() < 0.5:
             img_np, msk_np = _elastic(img.numpy(), mask.squeeze().numpy())
             img  = torch.from_numpy(img_np)
             mask = torch.from_numpy(msk_np).unsqueeze(0)
@@ -670,11 +674,13 @@ for fold_idx in range(n_folds):
         background_ratio=CONFIG["background_ratio"],
         samples_per_patient=CONFIG["samples_per_patient"],
         max_vol_pos_frac=CONFIG["max_vol_pos_frac"],
+        img_size=CONFIG["img_size"],
     )
     val_ds = AllSlicesDataset(
         CONFIG["image_dir"], CONFIG["mask_dir"],
         patient_ids=val_ids,
         max_vol_pos_frac=CONFIG["max_vol_pos_frac"],
+        img_size=CONFIG["img_size"],
     )
     train_loader = DataLoader(train_ds, batch_size=CONFIG["batch_size"], shuffle=True,
                               num_workers=0, pin_memory=True)
@@ -683,7 +689,7 @@ for fold_idx in range(n_folds):
 
     # Fresh model — encoder unfrozen with small LR to adapt ImageNet→CT features
     model = smp.UnetPlusPlus(
-        encoder_name="resnet34", encoder_weights="imagenet",
+        encoder_name="efficientnet-b4", encoder_weights="imagenet",
         in_channels=3, classes=1, activation=None,
     ).to(device)
 
@@ -761,12 +767,13 @@ best_val_ds  = AllSlicesDataset(
     CONFIG["image_dir"], CONFIG["mask_dir"],
     patient_ids=best_val_ids,
     max_vol_pos_frac=CONFIG["max_vol_pos_frac"],
+    img_size=CONFIG["img_size"],
 )
 val_loader = DataLoader(best_val_ds, batch_size=CONFIG["batch_size"], shuffle=False,
                         num_workers=0, pin_memory=True)
 # Reload model with best fold weights for TTA
 model = smp.UnetPlusPlus(
-    encoder_name="resnet34", encoder_weights=None,
+    encoder_name="efficientnet-b4", encoder_weights=None,
     in_channels=3, classes=1, activation=None,
 ).to(device)
 

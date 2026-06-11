@@ -33,7 +33,7 @@ os.makedirs(OUT_IMG,  exist_ok=True)
 os.makedirs(OUT_MASK, exist_ok=True)
 
 HU_MIN, HU_MAX = -200, 300   # same window as Decathlon preprocessing
-TARGET_HW = 256              # resize each slice to 256×256 — saves ~8× disk vs 512×512
+TARGET_HW = 384              # resize each slice to 384×384 — better detail than 256×256
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
