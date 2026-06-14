@@ -10,7 +10,23 @@
       "Bash(dir \"E:\\\\LICENTA2\\\\Task06_Lung\")",
       "Bash(dir \"E:\\\\LICENTA2\\\\Task06_Lung\\\\imagesTr\")",
       "Bash(rclone version *)",
-      "Bash(rclone authorize *)"
+      "Bash(rclone authorize *)",
+      "WebSearch",
+      "Bash(git -C \"d:/LICENTA2/LungTumorTrackingSystem\" add PREPROCESS_KAGGLE.py COLAB_TRAINING_CELL.py)",
+      "Bash(git -C \"d:/LICENTA2/LungTumorTrackingSystem\" status)",
+      "PowerShell(& \"C:\\\\Users\\\\40749\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\python.exe\" -c \"import torch; print\\('torch ok'\\)\" 2>&1)",
+      "PowerShell(& \"C:\\\\Users\\\\40749\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\python.exe\" \"d:\\\\LICENTA2\\\\LungTumorTrackingSystem\\\\check_results.py\")",
+      "PowerShell(& \"C:\\\\Users\\\\40749\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\python.exe\" \"d:\\\\LICENTA2\\\\LungTumorTrackingSystem\\\\show_results.py\")",
+      "Bash(find /e/LICENTA2 -name \"*.dcm\" | head -5 && echo \"---\" && find /e/LICENTA2 -name \"*.dcm\" | wc -l)",
+      "Read(//e/LICENTA2/**)",
+      "PowerShell(& \"C:\\\\Users\\\\40749\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\python.exe\" -m pip install pydicom -q)",
+      "PowerShell(& \"C:\\\\Users\\\\40749\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\python.exe\" \"d:\\\\LICENTA2\\\\LungTumorTrackingSystem\\\\tracking.py\")",
+      "PowerShell(& \"C:\\\\Users\\\\40749\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\python.exe\" -m pip install segmentation-models-pytorch -q)",
+      "PowerShell(& \"C:\\\\Users\\\\40749\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\python.exe\" -m pip install streamlit -q)",
+      "PowerShell(& \"C:\\\\Users\\\\40749\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\python.exe\" -m streamlit run \"d:\\\\LICENTA2\\\\LungTumorTrackingSystem\\\\demo_app.py\" --server.headless false)",
+      "PowerShell(& \"C:\\\\Users\\\\40749\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\python.exe\" \"d:\\\\LICENTA2\\\\LungTumorTrackingSystem\\\\precompute_demo.py\" 2>&1)",
+      "PowerShell(Get-Process python -ErrorAction SilentlyContinue)",
+      "PowerShell(& \"C:\\\\Users\\\\40749\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\python.exe\" \"d:\\\\LICENTA2\\\\LungTumorTrackingSystem\\\\export_dicom_slice.py\" 2>&1)"
     ]
   }
 }
