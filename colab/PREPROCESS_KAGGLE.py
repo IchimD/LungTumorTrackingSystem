@@ -1,21 +1,3 @@
-"""
-PREPROCESS_KAGGLE.py
-====================
-Downloads and preprocesses TWO datasets into /kaggle/working/images/ and /kaggle/working/masks/
-
-Dataset 1 — Medical Segmentation Decathlon Task06_Lung (63 patients)
-  Source: Kaggle dataset  vivekprajapati2048/medical-segmentation-decathlon-lung
-  Add it via Notebook Settings → Add Data before running.
-
-Dataset 2 — NSCLC-Radiomics-NIFTI (422 patients, lung cancer GTV for radiotherapy)
-  Source: HuggingFace  farrell236/NSCLC-Radiomics-NIFTI
-  Downloaded automatically via huggingface_hub.
-
-Combined: ~485 patients with lung tumor segmentation masks.
-
-Run this once before COLAB_TRAINING_CELL.py.
-"""
-
 import os, sys, glob, warnings
 import numpy as np
 import nibabel as nib

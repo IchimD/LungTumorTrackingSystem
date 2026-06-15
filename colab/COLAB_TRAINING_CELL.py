@@ -1,34 +1,5 @@
-"""
-GOOGLE COLAB TRAINING CELL — U-Net Lung Nodule Segmentation (IMPROVED)
-========================================================================
-Copy this ENTIRE file into a single Colab notebook cell and run it.
-
-Key improvements over v1 (fixes 0.50 → target 0.70-0.80 Dice):
-  1. ReduceLROnPlateau scheduler  — biggest single fix; LR decays on plateau
-  2. background_ratio = 0.05      — model sees 95% positive slices
-  3. bce_weight = 0.3             — Dice loss gets 70% weight vs 30% BCE
-  4. Gradient clipping (max 1.0)  — stable training at higher LR
-  5. Early stopping (patience 20) — stops before overfitting
-  6. Stronger augmentation        — rotation 90°, Gaussian noise, brightness
-  7. 120 epochs, batch 32         — more training on Colab GPU
-  8. Live loss/Dice plot          — visible inside Colab cell every 5 epochs
-  9. TensorBoard logging          — full curves + sample predictions
-
-GitHub: https://github.com/IchimD/LungTumorTrackingSystem
-
-Drive layout expected:
-  My Drive/LICENTA_COLAB/           <- images (.npy files)
-  My Drive/LICENTA_COLAB/masks_rclone/ <- masks  (.npy files)
-  My Drive/LICENTA_COLAB/logs/      <- TensorBoard output (auto-created)
-  My Drive/LICENTA_COLAB/results/   <- checkpoints (auto-created)
-"""
-
-# ============================================================================
-# STEP 1 — Install dependencies
-# ============================================================================
 import os, sys
 
-# ── Detect environment ────────────────────────────────────────────────────────
 # Check Kaggle first — Kaggle has google.colab installed but it doesn't work
 IS_KAGGLE = os.path.exists("/kaggle/working")
 IS_COLAB = False
@@ -42,11 +13,8 @@ if not IS_KAGGLE:
 ENV = "Colab" if IS_COLAB else ("Kaggle" if IS_KAGGLE else "Vast.ai / other")
 print(f"Environment: {ENV}")
 
-# ============================================================================
-# STEP 1 — Install dependencies
-# ============================================================================
 print("\n" + "=" * 70)
-print("STEP 1: Installing dependencies …")
+print("Installing dependencies …")
 print("=" * 70)
 
 if IS_COLAB:
@@ -56,22 +24,16 @@ if IS_COLAB:
     )
 os.system("pip install -q SimpleITK scipy tqdm tensorboard matplotlib segmentation-models-pytorch")
 
-# ============================================================================
-# STEP 2 — Mount Google Drive (Colab only — Vast.ai uses local /workspace)
-# ============================================================================
 if IS_COLAB:
     print("\n" + "=" * 70)
-    print("STEP 2: Mounting Google Drive …")
+    print("Mounting Google Drive …")
     print("=" * 70)
     _colab_drive.mount("/content/drive", force_remount=True)
 else:
     print("\nSTEP 2: Skipped (not Colab — data already on local disk)")
 
-# ============================================================================
-# STEP 3 — Clone / update repository
-# ============================================================================
 print("\n" + "=" * 70)
-print("STEP 3: Cloning repository …")
+print("Cloning repository …")
 print("=" * 70)
 
 REPO_URL = "https://github.com/IchimD/LungTumorTrackingSystem"
@@ -87,9 +49,6 @@ else:
 sys.path.insert(0, REPO_DIR)
 os.chdir(REPO_DIR)
 
-# ============================================================================
-# STEP 4 — Imports
-# ============================================================================
 import random, json, warnings
 from typing import List, Optional, Tuple
 
@@ -149,9 +108,7 @@ from src.data.io import (
     patient_id_from_filename,
 )
 
-# ============================================================================
-# CONFIGURATION  ← tune these values
-# ============================================================================
+# ── Configuration ─────────────────────────────────────────────────────────────
 CONFIG = {
     # ── paths (auto-detected per environment) ────────────────────────────────
     "image_dir":   ("/content/images" if IS_COLAB
@@ -620,11 +577,8 @@ def log_sample_images(writer, model, dataset, device, epoch, max_images=4):
         writer.add_image("val/predictions", grid, epoch)
 
 
-# ============================================================================
-# STEP 5 — 5-Fold Cross-Validation
-# ============================================================================
 print("\n" + "=" * 70)
-print("STEP 5: 5-Fold Cross-Validation Setup")
+print("Cross-Validation Setup")
 print("=" * 70)
 
 set_seed(CONFIG["seed"])
@@ -656,9 +610,6 @@ criterion = BCEDiceLoss(bce_weight=CONFIG["bce_weight"], pos_weight=CONFIG["pos_
 
 fold_best_dices = []
 
-# ============================================================================
-# STEP 6-8 — Train each fold
-# ============================================================================
 for fold_idx in range(n_folds):
     print(f"\n{'='*70}")
     print(f"FOLD {fold_idx+1}/{n_folds}")

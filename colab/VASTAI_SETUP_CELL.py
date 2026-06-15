@@ -1,21 +1,5 @@
-"""
-VASTAI_SETUP_CELL.py
-====================
-Paste this as Cell 1 in your Vast.ai Jupyter notebook.
-Run it ONCE after connecting to the instance.
-
-What it does:
-  1. Installs Python dependencies
-  2. Installs rclone and connects to your Google Drive
-  3. Copies your dataset + checkpoint from Drive to local SSD
-  4. Clones the GitHub repository
-
-After this cell finishes, paste COLAB_TRAINING_CELL.py as Cell 2 and run it.
-"""
-
 import os, subprocess
 
-# ── 1. Install Python dependencies ───────────────────────────────────────────
 print("=" * 60)
 print("Installing dependencies...")
 print("=" * 60)
@@ -24,7 +8,6 @@ os.system("pip install -q torch torchvision torchaudio --index-url https://downl
 os.system("pip install -q SimpleITK scipy tqdm tensorboard matplotlib")
 print("✓ Dependencies installed")
 
-# ── 2. Install rclone ─────────────────────────────────────────────────────────
 print("\n" + "=" * 60)
 print("Installing rclone...")
 print("=" * 60)
@@ -33,17 +16,10 @@ os.system("curl https://rclone.org/install.sh | sudo bash -s 2>/dev/null")
 result = os.popen("rclone version").read()
 print(f"✓ {result.splitlines()[0] if result else 'rclone installed'}")
 
-# ── 3. Configure rclone with your Google Drive token ─────────────────────────
 print("\n" + "=" * 60)
 print("Configuring Google Drive access...")
 print("=" * 60)
 
-# ┌─────────────────────────────────────────────────────────────────┐
-# │  PASTE YOUR TOKEN BELOW                                         │
-# │  Get it by running on your Windows PC:                          │
-# │    rclone authorize "drive"                                     │
-# │  Then copy the long JSON token that appears and paste it here   │
-# └─────────────────────────────────────────────────────────────────┘
 RCLONE_TOKEN = 'PASTE_YOUR_TOKEN_HERE'
 
 rclone_config = f"""[gdrive]
@@ -64,10 +40,8 @@ else:
     print("✓ Google Drive connected")
     print(f"  Drive root folders: {test[:200]}")
 
-# ── 4. Copy dataset from Drive to local SSD ──────────────────────────────────
 print("\n" + "=" * 60)
 print("Copying dataset from Drive to local SSD...")
-print("(Vast.ai has fast internet — this takes 5-15 min)")
 print("=" * 60)
 
 os.makedirs("/workspace/images", exist_ok=True)
@@ -97,7 +71,6 @@ print(f"  Images : {n_images}")
 print(f"  Masks  : {n_masks}")
 print(f"  Checkpoint: {'found — will resume' if checkpoint_exists else 'not found — fresh start'}")
 
-# ── 5. Clone repository ───────────────────────────────────────────────────────
 print("\n" + "=" * 60)
 print("Cloning repository...")
 print("=" * 60)
@@ -116,7 +89,6 @@ import sys
 sys.path.insert(0, REPO_DIR)
 os.chdir(REPO_DIR)
 
-# ── 6. GPU info ───────────────────────────────────────────────────────────────
 print("\n" + "=" * 60)
 print("GPU info")
 print("=" * 60)
@@ -131,5 +103,5 @@ else:
     print("⚠ No GPU — make sure you selected a GPU instance on Vast.ai")
 
 print("\n" + "=" * 60)
-print("SETUP COMPLETE — paste COLAB_TRAINING_CELL.py as Cell 2 and run it")
+print("SETUP COMPLETE")
 print("=" * 60)

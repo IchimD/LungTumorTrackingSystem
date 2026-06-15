@@ -1,17 +1,3 @@
-"""
-Preprocess Medical Segmentation Decathlon Task06_Lung
-=====================================================
-Run this ONCE on Vast.ai after downloading the data.
-Converts .nii.gz volumes to .npy files the training cell expects.
-
-Usage:
-  python PREPROCESS_DECATHLON.py
-  (or paste into a Jupyter cell)
-
-Input:  /workspace/Task06_Lung/imagesTr/  and  /workspace/Task06_Lung/labelsTr/
-Output: /workspace/images/  and  /workspace/masks/
-"""
-
 import os, glob
 import numpy as np
 
